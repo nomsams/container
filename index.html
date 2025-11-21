@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Dust Container Designer PRO</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --panel: #ffffff;
+      --line: #d0d7e2;
+      --fg: #0f172a;
+      --muted: #64748b;
+      --accent: #2563eb;
+      --accent-soft: #e0edff;
+      --danger: #ef4444;
+      --shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+      --radius: 10px;
+      --font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: var(--font);
+      background: radial-gradient(circle at top, #e5edff 0, #f4f7fb 38%, #f4f7fb 100%);
+      color: var(--fg);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    #app {
+      display: flex;
+      flex: 1;
+      padding: 10px;
+      gap: 10px;
+      min-height: 0;
+    }
+    #left-panel {
+      width: 380px;
+      min-width: 340px;
+      max-width: 420px;
+      background: var(--panel);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      overflow: hidden;
+    }
+    #canvas-panel {
+      flex: 1;
+      background: var(--panel);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      min-height: 0;
+    }
+    #renderer-container {
+      flex: 1;
+      min-height: 0;
+    }
+    h1 {
+      font-size: 18px;
+      margin: 0 0 4px;
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 8px;
+    }
+    h1 span.small {
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: normal;
+    }
+    .section {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 6px 8px 8px;
+      margin-bottom: 4px;
+    }
+    .section-header {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+      margin-bottom: 4px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .section-header button.toggle {
+      border: none;
+      background: none;
+      font-size: 11px;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 0;
+    }
+    .field {
+      display: flex;
+      flex-direction: column;
+      margin-bottom: 4px;
+    }
+    .field-row {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    .field label {
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 2px;
+    }
+    .field input[type="number"],
+    .field select {
+      flex: 1;
+      padding: 3px 5px;
+      font-size: 12px;
+      border-radius: 6px;
+      border: 1px solid var(--line);
+      outline: none;
+    }
+    .field input[type="number"]:focus,
+    .field select:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent-soft);
+    }
+    .field input.invalid {
+      border-color: var(--danger);
+      background: #fee2e2;
+    }
+    .field input[type="range"] {
+      width: 100%;
+    }
+    .inline-checkbox {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+    .inline-checkbox input {
+      margin: 0;
+    }
+    .output-grid {
+      display: grid;
+      grid-template-columns: 1.1fr 1fr;
+      gap: 3px 6px;
+      font-size: 11px;
+    }
+    .output-label {
+      color: var(--muted);
+    }
+    .output-value {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    button.small-btn {
+      padding: 3px 6px;
+      border-radius: 6px;
+      border: 1px solid var(--line);
+      background: #f8fafc;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    button.small-btn.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #ffffff;
+    }
+    button.small-btn:disabled {
+      opacity: 0.4;
+      cursor: default;
+    }
+    #bottom-bar {
+      height: 28px;
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      font-size: 11px;
+      color: var(--muted);
+      border-top: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.9);
+    }
+    #log-text {
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    #undo-redo {
+      display: flex;
+      gap: 4px;
+      margin-left: 10px;
+    }
+    #undo-redo button {
+      padding: 2px 4px;
+      font-size: 10px;
+      border-radius: 4px;
+      border: 1px solid var(--line);
+      background: #f8fafc;
+      cursor: pointer;
+    }
+    /* Modal for Fix / Ignore */
+    #error-modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.45);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+    }
+    #error-modal .inner {
+      background: #ffffff;
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+      padding: 12px 14px;
+      max-width: 360px;
+      width: 90%;
+      font-size: 12px;
+      color: var(--fg);
+    }
+    #error-modal .inner h3 {
+      margin: 0 0 6px;
+      font-size: 14px;
+    }
+    #error-modal .inner p {
+      margin: 0 0 8px;
+      font-size: 12px;
+    }
+    #error-modal .buttons {
+      display: flex;
+      justify-content: flex-end;
+      gap: 6px;
+    }
+    #error-modal button {
+      padding: 3px 8px;
+      font-size: 11px;
+      border-radius: 6px;
+      cursor: pointer;
+      border: 1px solid var(--line);
+    }
+    #error-modal button.fix {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    #error-modal button.ignore {
+      background: #f9fafb;
+    }
+    /* Quick log list (optional) */
+    #log-panel {
+      position: absolute;
+      left: 8px;
+      bottom: 36px;
+      width: 260px;
+      max-height: 200px;
+      overflow: auto;
+      background: rgba(15, 23, 42, 0.96);
+      color: #e5e7eb;
+      border-radius: 8px;
+      font-size: 10px;
+      padding: 6px 8px;
+      display: none;
+      z-index: 50;
+    }
+    #log-panel h4 {
+      margin: 0 0 4px;
+      font-size: 11px;
+      color: #cbd5f5;
+    }
+    #log-panel ul {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    #log-panel li {
+      margin-bottom: 2px;
+      opacity: 0.9;
+    }
+    #log-toggle {
+      cursor: pointer;
+      margin-left: 6px;
+      font-size: 11px;
+      color: var(--accent);
+    }
+    #log-toggle:hover {
+      text-decoration: underline;
+    }
+    #renderer-container canvas {
+      border-radius: 10px;
+    }
+    .version-labels {
+      font-size: 10px;
+      color: var(--muted);
+      text-align: right;
+    }
+  </style>
+
+  <!-- Three.js & helpers (ES modules) -->
+  <script type="module" src="core-app.js"></script>
+</head>
+<body>
+  <div id="app">
+    <div id="left-panel">
+      <h1>
+        Dust Container Designer
+        <span class="small">
+          HTML v<span id="html-version-label">1.0.0</span> · JS v<span id="js-version-label">1.0.0</span>
+        </span>
+      </h1>
+
+      <div class="section" id="section-geometry">
+        <div class="section-header">
+          <span>Container Geometry (mm)</span>
+        </div>
+        <div class="field">
+          <label for="input-l-rect">Rectangular length L_rect</label>
+          <div class="field-row">
+            <input type="number" id="input-l-rect" min="500" max="6000" step="10" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="input-x-hopper">Wedge length x_hopper</label>
+          <div class="field-row">
+            <input type="number" id="input-x-hopper" min="0" max="6000" step="10" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="input-h">Height H</label>
+          <div class="field-row">
+            <input type="number" id="input-h" min="300" max="6000" step="10" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="input-w">Width W</label>
+          <div class="field-row">
+            <input type="number" id="input-w" min="300" max="6000" step="10" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="input-t-wall">Wall thickness t_wall</label>
+          <div class="field-row">
+            <input type="number" id="input-t-wall" min="2" max="50" step="1" />
+          </div>
+        </div>
+      </div>
+
+      <div class="section" id="section-frame">
+        <div class="section-header">
+          <span>Forklift Frame & Pockets</span>
+        </div>
+        <div class="inline-checkbox">
+          <input type="checkbox" id="chk-include-frame" checked />
+          <label for="chk-include-frame">Include forklift frame</label>
+        </div>
+        <div class="field">
+          <label for="input-h-frame">Frame height H_frame</label>
+          <input type="number" id="input-h-frame" min="30" max="400" step="5" />
+        </div>
+        <div class="inline-checkbox">
+          <input type="checkbox" id="chk-unlock-pockets" />
+          <label for="chk-unlock-pockets">Unlock pocket dimensions</label>
+        </div>
+        <div class="field">
+          <label for="input-w-pocket">Pocket width (mm)</label>
+          <input type="number" id="input-w-pocket" min="100" max="600" step="5" />
+        </div>
+        <div class="field">
+          <label for="input-h-pocket">Pocket height (mm)</label>
+          <input type="number" id="input-h-pocket" min="50" max="400" step="5" />
+        </div>
+        <div class="field">
+          <label for="input-s-pocket">Pocket spacing solid (outer-to-outer) (mm)</label>
+          <input type="number" id="input-s-pocket" min="50" max="1000" step="5" />
+        </div>
+      </div>
+
+      <div class="section" id="section-lid">
+        <div class="section-header">
+          <span>Lid (Top Cover)</span>
+        </div>
+        <div class="inline-checkbox">
+          <input type="checkbox" id="chk-include-lid" />
+          <label for="chk-include-lid">Include lid</label>
+        </div>
+        <div class="field">
+          <label for="input-t-lid">Lid thickness t_lid (mm)</label>
+          <input type="number" id="input-t-lid" min="1" max="20" step="1" />
+        </div>
+        <div class="field">
+          <label for="input-r-hole">Lid hole radius (mm)</label>
+          <input type="number" id="input-r-hole" min="20" max="800" step="5" />
+        </div>
+        <div class="field">
+          <label for="input-lid-edge">Lid edge length (ring width) (mm)</label>
+          <input type="number" id="input-lid-edge" min="20" max="800" step="5" />
+        </div>
+        <div class="field">
+          <label for="input-lid-offset">Hole offset from hopper edge (mm)</label>
+          <input type="number" id="input-lid-offset" min="0" max="6000" step="10" />
+        </div>
+        <div class="inline-checkbox">
+          <input type="checkbox" id="chk-advanced-lid-mat" />
+          <label for="chk-advanced-lid-mat">Advanced lid material</label>
+        </div>
+        <div class="field">
+          <label for="input-rho-lid">Lid density ρ_lid (kg/m³)</label>
+          <input type="number" id="input-rho-lid" min="500" max="20000" step="50" />
+        </div>
+      </div>
+
+      <div class="section" id="section-material">
+        <div class="section-header">
+          <span>Materials & Dust</span>
+        </div>
+        <div class="field">
+          <label for="select-shell-material">Shell material</label>
+          <select id="select-shell-material">
+            <option value="steel">Structural steel (7850)</option>
+            <option value="stainless">Stainless steel (~8000)</option>
+            <option value="aluminum">Aluminum (2700)</option>
+            <option value="custom">Custom</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="input-rho-shell">Shell density ρ_shell (kg/m³)</label>
+          <input type="number" id="input-rho-shell" min="500" max="25000" step="50" />
+        </div>
+        <div class="field">
+          <label for="input-rho-dust">Dust density ρ_dust (kg/m³)</label>
+          <input type="number" id="input-rho-dust" min="500" max="4000" step="10" />
+        </div>
+        <div class="field">
+          <label for="input-humidity">Humidity (%)</label>
+          <input type="number" id="input-humidity" min="0" max="100" step="1" />
+        </div>
+        <div class="field">
+          <label for="input-fill-perc">Fill percentage (%)</label>
+          <input type="number" id="input-fill-perc" min="0" max="100" step="1" />
+        </div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px;">
+          Hint: density assumes 0% humidity. Hover info in app can explain Swedish humidity impact.
+        </div>
+      </div>
+
+      <div class="section" id="section-output">
+        <div class="section-header">
+          <span>Results (live)</span>
+        </div>
+        <div class="output-grid">
+          <div class="output-label">Internal volume</div>
+          <div class="output-value"><span id="out-v-int">–</span> m³</div>
+          <div class="output-label">Fill volume</div>
+          <div class="output-value"><span id="out-v-fill">–</span> m³</div>
+          <div class="output-label">Shell mass</div>
+          <div class="output-value"><span id="out-m-shell">–</span> kg</div>
+          <div class="output-label">Lid mass</div>
+          <div class="output-value"><span id="out-m-lid">–</span> kg</div>
+          <div class="output-label">Dust mass</div>
+          <div class="output-value"><span id="out-m-dust">–</span> kg</div>
+          <div class="output-label">Total (filled)</div>
+          <div class="output-value"><span id="out-m-total">–</span> kg</div>
+          <div class="output-label">CoG empty (x,y,z)</div>
+          <div class="output-value"><span id="out-cog-empty">–</span></div>
+          <div class="output-label">CoG filled (x,y,z)</div>
+          <div class="output-value"><span id="out-cog-filled">–</span></div>
+        </div>
+      </div>
+
+      <div class="section" id="section-view">
+        <div class="section-header">
+          <span>View & Movement</span>
+          <button class="toggle" id="btn-reset-view">Reset view</button>
+        </div>
+        <div class="inline-checkbox">
+          <input type="checkbox" id="chk-snap-grid" checked />
+          <label for="chk-snap-grid">Snap movement to grid</label>
+        </div>
+        <div class="field">
+          <label for="input-move-step">Move step (mm)</label>
+          <input type="number" id="input-move-step" min="1" max="1000" step="1" />
+        </div>
+        <div class="inline-checkbox">
+          <input type="checkbox" id="chk-ref-cube" />
+          <label for="chk-ref-cube">Show 1m reference cube</label>
+        </div>
+        <div class="inline-checkbox">
+          <input type="checkbox" id="chk-show-cog-empty" checked />
+          <label for="chk-show-cog-empty">Show CoG (empty)</label>
+        </div>
+        <div class="inline-checkbox">
+          <input type="checkbox" id="chk-show-cog-filled" checked />
+          <label for="chk-show-cog-filled">Show CoG (filled)</label>
+        </div>
+      </div>
+
+      <div class="section" id="section-advanced">
+        <div class="section-header">
+          <span>Advanced & IO</span>
+        </div>
+        <div class="field-row" style="margin-bottom:4px;flex-wrap:wrap;gap:4px;">
+          <button class="small-btn" id="btn-export-config">Export config (JSON)</button>
+          <button class="small-btn" id="btn-import-config">Import config (JSON)</button>
+        </div>
+        <div class="field-row" style="margin-bottom:4px;flex-wrap:wrap;gap:4px;">
+          <button class="small-btn" id="btn-export-container">Export container STL</button>
+          <button class="small-btn" id="btn-export-lid">Export lid STL</button>
+        </div>
+        <div class="inline-checkbox">
+          <input type="checkbox" id="chk-export-lid-with-container" />
+          <label for="chk-export-lid-with-container">Include lid in container STL</label>
+        </div>
+        <div class="field-row" style="margin-bottom:4px;flex-wrap:wrap;gap:4px;">
+          <label class="small-btn" for="input-import-stl">Import STL…</label>
+          <input type="file" id="input-import-stl" accept=".stl" style="display:none;" />
+          <button class="small-btn" id="btn-copy-source">Copy HTML+JS source</button>
+          <button class="small-btn" id="btn-reset-defaults">Reset to defaults</button>
+        </div>
+      </div>
+
+      <div class="version-labels">
+        Scene: WASD to move selected object · Click to select · Scroll to zoom · Drag to orbit
+      </div>
+    </div>
+
+    <div id="canvas-panel">
+      <div id="renderer-container"></div>
+      <div id="log-panel">
+        <h4>Event log</h4>
+        <ul id="log-list"></ul>
+      </div>
+      <div id="bottom-bar">
+        <div id="log-text">Ready.</div>
+        <span id="log-toggle">Log</span>
+        <div id="undo-redo">
+          <button id="btn-undo" title="Undo last change">Undo</button>
+          <button id="btn-redo" title="Redo">Redo</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Error modal for Fix / Ignore -->
+  <div id="error-modal">
+    <div class="inner">
+      <h3>Parameter issue</h3>
+      <p id="error-message"></p>
+      <p id="error-fix-text" style="font-size:11px;color:var(--muted);"></p>
+      <div class="buttons">
+        <button class="ignore" id="btn-error-ignore">Ignore</button>
+        <button class="fix" id="btn-error-fix">Fix</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
