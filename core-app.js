@@ -1,1503 +1,1114 @@
 // core-app.js – Dust Container Designer PRO
-// Pure front-end. Three.js + helpers from CDN.
+// Uses import map from index.html:
+//   "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+//   "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
 
-import * as THREE from "https://unpkg.com/three@0.162.0/build/three.module.js";
-import { OrbitControls } from "https://unpkg.com/three@0.162.0/examples/jsm/controls/OrbitControls.js";
-import { STLLoader } from "https://unpkg.com/three@0.162.0/examples/jsm/loaders/STLLoader.js";
-import { STLExporter } from "https://unpkg.com/three@0.162.0/examples/jsm/exporters/STLExporter.js";
-
-/* ------------------------------------------------------------------ */
-/* Helpers                                                            */
-/* ------------------------------------------------------------------ */
-
-const HTML_VERSION = "1.0.0";
-const JS_VERSION = "1.1.0";
-const STORAGE_KEY = "dustContainerConfigV1";
-
-function deepClone(obj) {
-  return JSON.parse(JSON.stringify(obj));
-}
-function mmToM(mm) {
-  return mm / 1000;
-}
-function fmt(v, d) {
-  if (v == null || Number.isNaN(v)) return "–";
-  return v.toFixed(d);
-}
-function byId(id) {
-  return document.getElementById(id);
-}
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { STLLoader } from "three/addons/loaders/STLLoader.js";
+import { STLExporter } from "three/addons/exporters/STLExporter.js";
 
 /* ------------------------------------------------------------------ */
-/* Default state                                                      */
+/* Configuration & state                                              */
 /* ------------------------------------------------------------------ */
+
+const APP_VERSION = "3.1.0";
 
 const DEFAULTS = {
-  // main geometry
-  L_rect: 1400,
-  x_hopper: 700,
-  H: 900,
+  L: 1400,
   W: 1300,
+  H: 900,
+  x_hopper: 700,
   t_wall: 5,
 
-  // frame & pockets
+  frame_h: 100,
+  frame_pocket_w: 230,
+  frame_pocket_h: 91,
+  frame_pocket_s: 142,
   include_frame: true,
-  H_frame: 100,
-  W_pocket: 230,
-  H_pocket: 91,
-  S_pocket: 142,
-  unlock_pockets: false,
 
-  // lid
   include_lid: false,
   t_lid: 3,
-  r_hole: 200,
-  lid_edge_length: 100,
-  lid_offset_from_hopper_edge: 500,
+  r_hole: 150,
+  lid_offset: 300,
   advanced_lid_material: false,
-  rho_lid: 7850,
 
-  // materials & dust
-  shell_material: "steel",
   rho_shell: 7850,
   rho_dust: 1850,
-  humidity: 0,
-  fill_percentage: 80,
+  rho_lid: 7850,
+  fill_percent: 80,
 
-  // view & movement
-  snap_to_grid: true,
-  move_step_mm: 50,
-  show_reference_cube: false,
-  show_cog_empty: true,
-  show_cog_filled: true,
-
-  // export
-  export_lid_with_container: false,
+  move_step: 50,
+  snap: true,
+  show_collisions: true,
+  show_cog_e: false,
+  show_cog_f: true,
 };
 
-let state = deepClone(DEFAULTS);
-let lastValidState = deepClone(DEFAULTS);
+let params = { ...DEFAULTS };
 
-const undoStack = [];
-const redoStack = [];
+let historyStack = [];
+let historyIndex = -1;
+let isUndoRedo = false;
 
-/* ------------------------------------------------------------------ */
-/* Three.js globals                                                   */
-/* ------------------------------------------------------------------ */
-
-let renderer, scene, camera, controls;
-let containerGroup, lidMesh, frameMesh, referenceCube;
-let cogEmptyArrow, cogFilledArrow;
-const importedObjects = []; // { mesh, name }
-let collisionMarker = null;
-let lastCollisionVolume = 0;
-
-// selection & UI
-let raycaster, mouse;
+/* Three.js globals */
+let scene, camera, renderer, controls, gridHelper;
+let containerGroup, lidMesh, dustMesh, frameGroup;
+let importedObjects = [];
+let collisionBoxes = [];
 let selectedObject = null;
-let logTextEl, logListEl;
-let selectedNameEl, baseFaceSelectEl, objectListEl;
-let pendingFixIgnore = null;
-
-// STL
-const loader = new STLLoader();
-const exporter = new STLExporter();
+let refCube, cogArrowEmpty, cogArrowFilled;
+const localCoG_E = new THREE.Vector3();
+const localCoG_F = new THREE.Vector3();
 
 /* ------------------------------------------------------------------ */
-/* Logging & modal                                                    */
+/* Init                                                               */
 /* ------------------------------------------------------------------ */
 
-function log(msg) {
-  const ts = new Date().toLocaleTimeString();
-  if (logTextEl) logTextEl.textContent = `${ts} – ${msg}`;
-  if (logListEl) {
-    const li = document.createElement("li");
-    li.textContent = `${ts} – ${msg}`;
-    logListEl.prepend(li);
-    while (logListEl.children.length > 200) {
-      logListEl.removeChild(logListEl.lastChild);
-    }
-  }
-}
-
-function showModal(message, fixText, onFix, onIgnore) {
-  const modal = byId("error-modal");
-  if (!modal) return;
-  byId("error-message").textContent = message;
-  byId("error-fix-text").textContent = fixText || "";
-  pendingFixIgnore = { onFix, onIgnore };
-  modal.style.display = "flex";
-}
-function closeModal() {
-  const modal = byId("error-modal");
-  if (modal) modal.style.display = "none";
-  pendingFixIgnore = null;
+function init() {
+  loadState();
+  initThreeJS();
+  setupUI();
+  updateUIFromParams();
+  rebuildContainer();
+  pushHistory();
+  animate();
+  log(`Dust Container Designer v${APP_VERSION} started.`);
 }
 
 /* ------------------------------------------------------------------ */
-/* State load/save & undo/redo                                        */
+/* Three.js setup                                                     */
 /* ------------------------------------------------------------------ */
 
-function loadState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      state = Object.assign(deepClone(DEFAULTS), parsed);
-      lastValidState = deepClone(state);
-      log("Loaded previous config.");
-      return;
-    }
-  } catch (e) {
-    console.warn("Failed to load state", e);
-  }
-  state = deepClone(DEFAULTS);
-  lastValidState = deepClone(DEFAULTS);
-  log("Using default config.");
-}
-function saveState() {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch (e) {
-    console.warn("Failed to save state", e);
-  }
-}
+function initThreeJS() {
+  const container = document.getElementById("main-view");
 
-function pushUndo() {
-  undoStack.push(deepClone(state));
-  if (undoStack.length > 50) undoStack.shift();
-  redoStack.length = 0;
-  updateUndoButtons();
-}
-function undo() {
-  if (!undoStack.length) return;
-  const prev = undoStack.pop();
-  redoStack.push(deepClone(state));
-  state = prev;
-  lastValidState = deepClone(state);
-  applyStateToInputs();
-  rebuildGeometry();
-  updateOutputs();
-  saveState();
-  updateUndoButtons();
-  log("Undo.");
-}
-function redo() {
-  if (!redoStack.length) return;
-  const next = redoStack.pop();
-  undoStack.push(deepClone(state));
-  state = next;
-  lastValidState = deepClone(state);
-  applyStateToInputs();
-  rebuildGeometry();
-  updateOutputs();
-  saveState();
-  updateUndoButtons();
-  log("Redo.");
-}
-function updateUndoButtons() {
-  const u = byId("btn-undo");
-  const r = byId("btn-redo");
-  if (u) u.disabled = undoStack.length === 0;
-  if (r) r.disabled = redoStack.length === 0;
-}
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xb0b0b0); // concrete grey
 
-/* ------------------------------------------------------------------ */
-/* Validation                                                         */
-/* ------------------------------------------------------------------ */
+  const aspect = container.clientWidth / container.clientHeight;
+  const d = 3000;
+  camera = new THREE.OrthographicCamera(
+    -d * aspect,
+    d * aspect,
+    d,
+    -d,
+    -5000,
+    10000
+  );
+  resetCameraView();
 
-function validateCandidate(c) {
-  // Basic >0 checks
-  if (c.L_rect <= 0 || c.H <= 0 || c.W <= 0 || c.t_wall <= 0) {
-    return {
-      ok: false,
-      message: "All main dimensions (L_rect, H, W, t_wall) must be > 0.",
-      fix: () => {
-        c.L_rect = Math.max(c.L_rect, 100);
-        c.H = Math.max(c.H, 100);
-        c.W = Math.max(c.W, 100);
-        c.t_wall = Math.max(c.t_wall, 2);
-      },
-      fields: ["input-l-rect", "input-h", "input-w", "input-t-wall"],
-    };
-  }
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+  renderer.setSize(container.clientWidth, container.clientHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  container.appendChild(renderer.domElement);
 
-  // Wall thickness vs cavity
-  const maxWall = Math.min(c.W, c.L_rect) / 4;
-  if (2 * c.t_wall >= c.W || 2 * c.t_wall >= c.L_rect) {
-    return {
-      ok: false,
-      message: "Wall thickness too large relative to width/length – inner cavity would collapse.",
-      fix: () => {
-        c.t_wall = Math.max(2, Math.floor(maxWall));
-      },
-      fields: ["input-t-wall"],
-    };
-  }
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.05;
+  controls.maxPolarAngle = Math.PI;
 
-  // Hopper length can't exceed rectangular length
-  if (c.x_hopper < 0 || c.x_hopper > c.L_rect) {
-    return {
-      ok: false,
-      message: "x_hopper must be between 0 and L_rect (wedge cannot be longer than the rectangular part).",
-      fix: () => {
-        c.x_hopper = Math.max(0, Math.min(c.x_hopper, c.L_rect));
-      },
-      fields: ["input-x-hopper", "input-l-rect"],
-    };
-  }
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+  scene.add(ambientLight);
 
-  // Frame height should not exceed container
-  if (c.include_frame && c.H_frame >= c.H) {
-    return {
-      ok: false,
-      message: "Frame height H_frame should be smaller than container height H.",
-      fix: () => {
-        c.H_frame = Math.max(30, Math.floor(c.H / 3));
-      },
-      fields: ["input-h-frame", "input-h"],
-    };
-  }
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+  dirLight.position.set(2000, 4000, 2000);
+  dirLight.castShadow = true;
+  dirLight.shadow.mapSize.width = 2048;
+  dirLight.shadow.mapSize.height = 2048;
+  dirLight.shadow.camera.near = 0.5;
+  dirLight.shadow.camera.far = 10000;
+  const dLight = 3000;
+  dirLight.shadow.camera.left = -dLight;
+  dirLight.shadow.camera.right = dLight;
+  dirLight.shadow.camera.top = dLight;
+  dirLight.shadow.camera.bottom = -dLight;
+  scene.add(dirLight);
 
-  // Pockets vs width
-  if (c.include_frame) {
-    const minMargin = 20;
-    const neededWidth = 2 * c.W_pocket + c.S_pocket + 2 * minMargin;
-    if (neededWidth > c.W) {
-      return {
-        ok: false,
-        message:
-          "Forklift pockets + spacing need more width than available. Reduce pocket width/spacing or increase container width.",
-        fix: () => {
-          const available = c.W - 2 * minMargin;
-          const newPocket = Math.max(50, Math.floor((available - c.S_pocket) / 2));
-          c.W_pocket = newPocket;
-        },
-        fields: ["input-w-pocket", "input-s-pocket", "input-w"],
-      };
-    }
-  }
+  // Ground grid (XZ plane, Habbo-like)
+  gridHelper = new THREE.GridHelper(10000, 100, 0x555555, 0x888888);
+  scene.add(gridHelper);
 
-  // Lid hole + edge must fit
-  if (c.include_lid) {
-    const maxRByW = c.W / 2 - c.lid_edge_length;
-    const maxRByL = c.L_rect / 2 - c.lid_edge_length;
-    const maxR = Math.max(20, Math.min(maxRByW, maxRByL));
-    if (c.r_hole > maxR) {
-      return {
-        ok: false,
-        message: "Lid hole radius too large; ring edge would become negative.",
-        fix: () => {
-          c.r_hole = maxR;
-        },
-        fields: ["input-r-hole", "input-lid-edge"],
-      };
-    }
-  }
-
-  return { ok: true };
-}
-
-function markInvalid(fields) {
-  document.querySelectorAll("input").forEach((el) => el.classList.remove("invalid"));
-  if (!fields) return;
-  fields.forEach((id) => {
-    const el = byId(id);
-    if (el) el.classList.add("invalid");
+  // Reference cube (1 m³ wireframe)
+  const geomRef = new THREE.BoxGeometry(1000, 1000, 1000);
+  const matRef = new THREE.MeshBasicMaterial({
+    color: 0xe74c3c,
+    wireframe: true,
+    transparent: true,
+    opacity: 0.5,
   });
+  refCube = new THREE.Mesh(geomRef, matRef);
+  refCube.position.set(2000, 500, 2000);
+  refCube.visible = false;
+  scene.add(refCube);
+
+  // CoG arrows
+  const headLen = 200;
+  const headW = 100;
+  cogArrowEmpty = new THREE.ArrowHelper(
+    new THREE.Vector3(0, -1, 0),
+    new THREE.Vector3(0, 0, 0),
+    1000,
+    0x2980b9,
+    headLen,
+    headW
+  );
+  cogArrowFilled = new THREE.ArrowHelper(
+    new THREE.Vector3(0, -1, 0),
+    new THREE.Vector3(0, 0, 0),
+    1000,
+    0xc0392b,
+    headLen,
+    headW
+  );
+  scene.add(cogArrowEmpty);
+  scene.add(cogArrowFilled);
+
+  window.addEventListener("resize", onWindowResize);
+  document.addEventListener("keydown", onKeyDown);
+  renderer.domElement.addEventListener("mousedown", onCanvasClick);
 }
 
-function commitState(newState, msg) {
-  const candidate = deepClone(newState);
-  const v = validateCandidate(candidate);
-  if (!v.ok) {
-    markInvalid(v.fields);
-    showModal(
-      v.message,
-      "Fix will auto-correct values. Ignore keeps the last valid geometry.",
-      () => {
-        v.fix && v.fix();
-        state = candidate;
-        lastValidState = deepClone(candidate);
-        markInvalid([]);
-        pushUndo();
-        applyStateToInputs();
-        rebuildGeometry();
-        updateOutputs();
-        saveState();
-        log("Auto-fix applied.");
-      },
-      () => {
-        state = deepClone(lastValidState);
-        applyStateToInputs();
-        markInvalid([]);
-        log("Invalid parameters ignored; geometry unchanged.");
-      }
-    );
-    return;
-  }
-
-  markInvalid([]);
-  pushUndo();
-  state = candidate;
-  lastValidState = deepClone(candidate);
-  applyStateToInputs();
-  rebuildGeometry();
-  updateOutputs();
-  saveState();
-  log(msg || "Updated parameters.");
+function resetCameraView() {
+  camera.position.set(3000, 3000, 3000);
+  camera.lookAt(0, 0, 0);
+  camera.zoom = 1;
+  camera.updateProjectionMatrix();
 }
 
 /* ------------------------------------------------------------------ */
-/* Apply state -> inputs                                              */
+/* Geometry / container                                               */
 /* ------------------------------------------------------------------ */
 
-function setVal(id, v) {
-  const el = byId(id);
-  if (el) el.value = v;
-}
-function setChecked(id, v) {
-  const el = byId(id);
-  if (el) el.checked = !!v;
-}
-function pocketLockUi(locked) {
-  ["input-w-pocket", "input-h-pocket", "input-s-pocket"].forEach((id) => {
-    const el = byId(id);
-    if (el) el.disabled = locked;
-  });
-}
-function lidMaterialUi(enabled) {
-  const el = byId("input-rho-lid");
-  if (el) el.disabled = !enabled;
-}
+function rebuildContainer() {
+  if (containerGroup) scene.remove(containerGroup);
 
-function applyStateToInputs() {
-  // geometry
-  setVal("input-l-rect", state.L_rect);
-  setVal("range-l-rect", state.L_rect);
-  setVal("input-x-hopper", state.x_hopper);
-  setVal("range-x-hopper", state.x_hopper);
-  setVal("input-h", state.H);
-  setVal("range-h", state.H);
-  setVal("input-w", state.W);
-  setVal("range-w", state.W);
-  setVal("input-t-wall", state.t_wall);
-  setVal("range-t-wall", state.t_wall);
+  containerGroup = new THREE.Group();
+  containerGroup.name = "Container";
 
-  // frame
-  setChecked("chk-include-frame", state.include_frame);
-  setVal("input-h-frame", state.H_frame);
-  setChecked("chk-unlock-pockets", state.unlock_pockets);
-  setVal("input-w-pocket", state.W_pocket);
-  setVal("input-h-pocket", state.H_pocket);
-  setVal("input-s-pocket", state.S_pocket);
-  pocketLockUi(!state.unlock_pockets);
-
-  // lid
-  setChecked("chk-include-lid", state.include_lid);
-  setVal("input-t-lid", state.t_lid);
-  setVal("input-r-hole", state.r_hole);
-  setVal("input-lid-edge", state.lid_edge_length);
-  setVal("input-lid-offset", state.lid_offset_from_hopper_edge);
-  setChecked("chk-advanced-lid-mat", state.advanced_lid_material);
-  setVal("input-rho-lid", state.rho_lid);
-  lidMaterialUi(state.advanced_lid_material);
-
-  // materials
-  const sel = byId("select-shell-material");
-  if (sel) sel.value = state.shell_material;
-  setVal("input-rho-shell", state.rho_shell);
-  setVal("input-rho-dust", state.rho_dust);
-  setVal("input-humidity", state.humidity);
-  setVal("input-fill-perc", state.fill_percentage);
-
-  // view
-  setChecked("chk-snap-grid", state.snap_to_grid);
-  setVal("input-move-step", state.move_step_mm);
-  setChecked("chk-ref-cube", state.show_reference_cube);
-  setChecked("chk-show-cog-empty", state.show_cog_empty);
-  setChecked("chk-show-cog-filled", state.show_cog_filled);
-
-  // export
-  setChecked("chk-export-lid-with-container", state.export_lid_with_container);
-}
-
-/* ------------------------------------------------------------------ */
-/* Geometry creation                                                  */
-/* ------------------------------------------------------------------ */
-
-function buildWedgeGeometry(L_rect_m, H_m, W_m, x_m) {
-  const hw = W_m / 2;
-  const verts = [
-    // y = -hw
-    0, -hw, 0,
-    -x_m, -hw, 0,
-    0, -hw, H_m,
-    // y = +hw
-    0, hw, 0,
-    -x_m, hw, 0,
-    0, hw, H_m,
-  ];
-  const idx = [
-    0, 1, 4, 0, 4, 3,
-    1, 2, 5, 1, 5, 4,
-    2, 0, 3, 2, 3, 5,
-    0, 1, 2,
-    3, 5, 4,
-  ];
-  const g = new THREE.BufferGeometry();
-  g.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
-  g.setIndex(idx);
-  g.computeVertexNormals();
-  return g;
-}
-
-// simple ring on top of lid to visually indicate hole location
-function createLidRingMesh(L, W, tLid) {
-  const rHole = mmToM(state.r_hole);
-  const ringWidth = mmToM(state.lid_edge_length);
-  const outerR = rHole + ringWidth;
-  const innerR = rHole;
-
-  const segments = 48;
-  const shape = new THREE.Shape();
-  shape.absarc(0, 0, outerR, 0, Math.PI * 2, false);
-  const holePath = new THREE.Path();
-  holePath.absarc(0, 0, innerR, 0, Math.PI * 2, true);
-  shape.holes.push(holePath);
-
-  const extrudeSettings = {
-    depth: tLid,
-    bevelEnabled: false,
-  };
-  const geom = new THREE.ExtrudeGeometry(shape, extrudeSettings);
-  geom.rotateX(Math.PI / 2); // stand on top of lid
-
-  const mat = new THREE.MeshStandardMaterial({
-    color: 0x6b7280,
+  const matShell = new THREE.MeshStandardMaterial({
+    color: 0x34495e,
+    roughness: 0.6,
     metalness: 0.3,
-    roughness: 0.6,
+    side: THREE.DoubleSide,
+  });
+  const matFrame = new THREE.MeshStandardMaterial({
+    color: 0x27ae60,
+    roughness: 0.7,
+    metalness: 0.1,
+  });
+  const matLid = new THREE.MeshStandardMaterial({
+    color: 0x95a5a6,
+    roughness: 0.5,
+  });
+  const matDust = new THREE.MeshBasicMaterial({
+    color: 0x8d6e63,
+    transparent: true,
+    opacity: 0.7,
   });
 
-  const mesh = new THREE.Mesh(geom, mat);
+  const { L, W, H, x_hopper, t_wall, frame_h, include_frame } = params;
+  const y_offset = include_frame ? frame_h : 0;
 
-  // Position ring center along length with offset from hopper edge (x=0)
-  const offsetX = mmToM(state.lid_offset_from_hopper_edge);
-  const cx = Math.min(Math.max(offsetX, 0), L);
-  const cy = 0;
-  const cz = mmToM(state.H) + tLid; // exactly on top of lid
-  mesh.position.set(cx, cy, cz);
+  // Floor
+  const floorGeo = new THREE.BoxGeometry(L, t_wall, W);
+  const floor = new THREE.Mesh(floorGeo, matShell);
+  floor.position.set(L / 2, y_offset + t_wall / 2, 0);
+  floor.castShadow = true;
+  floor.receiveShadow = true;
+  containerGroup.add(floor);
+  addEdge(floor);
 
-  return mesh;
-}
+  // Side walls by extruding side profile
+  const shape = new THREE.Shape();
+  shape.moveTo(0, 0);
+  shape.lineTo(L, 0);
+  if (x_hopper > 1) {
+    shape.lineTo(L + x_hopper, H);
+    shape.lineTo(0, H);
+  } else {
+    shape.lineTo(L, H);
+    shape.lineTo(0, H);
+  }
+  shape.lineTo(0, 0);
 
-function createContainerGroup() {
-  const group = new THREE.Group();
-
-  const L = mmToM(state.L_rect);
-  const H = mmToM(state.H);
-  const W = mmToM(state.W);
-  const x = mmToM(state.x_hopper);
-  const Hf = mmToM(state.H_frame);
-
-  const shellMat = new THREE.MeshStandardMaterial({
-    color: 0x2563eb,
-    metalness: 0.4,
-    roughness: 0.4,
-  });
-  const frameMat = new THREE.MeshStandardMaterial({
-    color: 0x00a676,
-    metalness: 0.5,
-    roughness: 0.3,
-  });
-  const lidMat = new THREE.MeshStandardMaterial({
-    color: 0x9ca3af,
-    metalness: 0.2,
-    roughness: 0.6,
+  const wallGeo = new THREE.ExtrudeGeometry(shape, {
+    depth: t_wall,
+    bevelEnabled: false,
   });
 
-  // Rectangular body
-  const rect = new THREE.Mesh(new THREE.BoxGeometry(L, H, W), shellMat);
-  rect.position.set(L / 2, 0, H / 2);
-  group.add(rect);
+  const wallLeft = new THREE.Mesh(wallGeo, matShell);
+  wallLeft.position.set(0, y_offset, W / 2 - t_wall);
+  wallLeft.castShadow = true;
+  wallLeft.receiveShadow = true;
+  containerGroup.add(wallLeft);
+  addEdge(wallLeft);
 
-  // Hopper wedge
-  if (state.x_hopper > 0) {
-    const wedgeGeom = buildWedgeGeometry(L, H, W, x);
-    const wedge = new THREE.Mesh(wedgeGeom, shellMat);
-    group.add(wedge);
+  const wallRight = new THREE.Mesh(wallGeo, matShell);
+  wallRight.position.set(0, y_offset, -W / 2);
+  wallRight.castShadow = true;
+  wallRight.receiveShadow = true;
+  containerGroup.add(wallRight);
+  addEdge(wallRight);
+
+  // Front wall (slanted if hopper)
+  if (x_hopper > 1) {
+    const slantLen = Math.sqrt(x_hopper ** 2 + H ** 2);
+    const angle = Math.atan2(H, x_hopper);
+    const fwGeo = new THREE.BoxGeometry(slantLen, W - 2 * t_wall, t_wall);
+    const fw = new THREE.Mesh(fwGeo, matShell);
+    const midX = L + x_hopper / 2;
+    const midY = H / 2;
+    fw.position.set(midX, y_offset + midY, 0);
+    fw.rotation.x = Math.PI / 2;
+    fw.rotation.y = -angle;
+    fw.castShadow = true;
+    fw.receiveShadow = true;
+    containerGroup.add(fw);
+    addEdge(fw);
+  } else {
+    const fw = new THREE.Mesh(
+      new THREE.BoxGeometry(t_wall, H, W - 2 * t_wall),
+      matShell
+    );
+    fw.position.set(L - t_wall / 2, y_offset + H / 2, 0);
+    fw.castShadow = true;
+    fw.receiveShadow = true;
+    containerGroup.add(fw);
+    addEdge(fw);
   }
 
-  // Frame
-  frameMesh = null;
-  if (state.include_frame && Hf > 0) {
-    const fm = new THREE.Mesh(new THREE.BoxGeometry(L, Hf, W), frameMat);
-    fm.position.set(L / 2, 0, Hf / 2);
-    group.add(fm);
-    frameMesh = fm;
+  // Back wall
+  const backWall = new THREE.Mesh(
+    new THREE.BoxGeometry(t_wall, H, W - 2 * t_wall),
+    matShell
+  );
+  backWall.position.set(t_wall / 2, y_offset + H / 2, 0);
+  backWall.castShadow = true;
+  backWall.receiveShadow = true;
+  containerGroup.add(backWall);
+  addEdge(backWall);
+
+  // Forklift frame (green)
+  frameGroup = null;
+  if (include_frame) {
+    frameGroup = new THREE.Group();
+    const wp = params.frame_pocket_w;
+    const sp = params.frame_pocket_s;
+    const groupW = 2 * wp + sp;
+    const margin = (W - groupW) / 2;
+    const yFrame = frame_h / 2;
+
+    const beamOuterGeo = new THREE.BoxGeometry(L, frame_h, margin);
+    const beamCenterGeo = new THREE.BoxGeometry(L, frame_h, sp);
+
+    const beamL = new THREE.Mesh(beamOuterGeo, matFrame);
+    beamL.position.set(L / 2, yFrame, W / 2 - margin / 2);
+    beamL.castShadow = true;
+    frameGroup.add(beamL);
+    addEdge(beamL);
+
+    const beamR = new THREE.Mesh(beamOuterGeo, matFrame);
+    beamR.position.set(L / 2, yFrame, -W / 2 + margin / 2);
+    beamR.castShadow = true;
+    frameGroup.add(beamR);
+    addEdge(beamR);
+
+    const beamC = new THREE.Mesh(beamCenterGeo, matFrame);
+    beamC.position.set(L / 2, yFrame, 0);
+    beamC.castShadow = true;
+    frameGroup.add(beamC);
+    addEdge(beamC);
+
+    const plateT = 5;
+    const topPlate = new THREE.Mesh(
+      new THREE.BoxGeometry(L, plateT, W),
+      matFrame
+    );
+    topPlate.position.set(L / 2, frame_h - plateT / 2, 0);
+    frameGroup.add(topPlate);
+
+    const botPlate = new THREE.Mesh(
+      new THREE.BoxGeometry(L, plateT, W),
+      matFrame
+    );
+    botPlate.position.set(L / 2, plateT / 2, 0);
+    frameGroup.add(botPlate);
+
+    containerGroup.add(frameGroup);
   }
 
   // Lid
   lidMesh = null;
-  if (state.include_lid) {
-    const tLid = mmToM(state.t_lid);
-    const lid = new THREE.Mesh(new THREE.BoxGeometry(L, tLid, W), lidMat);
-    lid.position.set(L / 2, 0, H + tLid / 2);
-    group.add(lid);
-    lidMesh = lid;
+  if (params.include_lid) {
+    const lidShape = new THREE.Shape();
+    lidShape.moveTo(0, -W / 2);
+    lidShape.lineTo(L + x_hopper, -W / 2);
+    lidShape.lineTo(L + x_hopper, W / 2);
+    lidShape.lineTo(0, W / 2);
+    lidShape.lineTo(0, -W / 2);
 
-    // ring to visualize hole location
-    const ring = createLidRingMesh(L, W, tLid);
-    group.add(ring);
+    const cx = L + x_hopper - params.lid_offset;
+    const holePath = new THREE.Path();
+    holePath.absarc(cx, 0, params.r_hole, 0, Math.PI * 2, true);
+    lidShape.holes.push(holePath);
+
+    const lidGeo = new THREE.ExtrudeGeometry(lidShape, {
+      depth: params.t_lid,
+      bevelEnabled: false,
+    });
+    lidMesh = new THREE.Mesh(lidGeo, matLid);
+    lidMesh.rotation.x = Math.PI / 2;
+    lidMesh.position.set(0, y_offset + H + params.t_lid, 0);
+    lidMesh.castShadow = true;
+    containerGroup.add(lidMesh);
+    addEdge(lidMesh);
   }
 
-  return group;
-}
+  // Dust fill (simplified as a box in rectangular section)
+  dustMesh = null;
+  const fillH = H * (params.fill_percent / 100);
+  if (fillH > 0) {
+    const dustGeo = new THREE.BoxGeometry(L - 2 * t_wall, fillH, W - 2 * t_wall);
+    dustMesh = new THREE.Mesh(dustGeo, matDust);
+    dustMesh.position.set(L / 2, y_offset + fillH / 2 + t_wall, 0);
+    containerGroup.add(dustMesh);
+  }
 
-function rebuildGeometry() {
-  if (!scene) return;
-  const prevWasContainerSelected = selectedObject === containerGroup || !selectedObject;
-
-  if (containerGroup) scene.remove(containerGroup);
-  containerGroup = createContainerGroup();
   scene.add(containerGroup);
 
-  if (prevWasContainerSelected) selectedObject = containerGroup;
+  if (
+    !selectedObject ||
+    (selectedObject.parent !== scene && selectedObject !== containerGroup)
+  ) {
+    selectedObject = containerGroup;
+  }
 
-  if (referenceCube) referenceCube.visible = state.show_reference_cube;
+  calculatePhysics();
+  updateLayerList();
+}
 
-  updateCogMarkers();
-  refreshObjectList();
-  updateSelectionUi();
+/* Wireframe edges for visual clarity */
+function addEdge(mesh) {
+  const edges = new THREE.EdgesGeometry(mesh.geometry);
+  const line = new THREE.LineSegments(
+    edges,
+    new THREE.LineBasicMaterial({
+      color: 0x000000,
+      opacity: 0.3,
+      transparent: true,
+    })
+  );
+  mesh.add(line);
 }
 
 /* ------------------------------------------------------------------ */
-/* Calculations for volume, mass & CoG                                */
+/* Physics: volumes, masses, CoG                                      */
 /* ------------------------------------------------------------------ */
 
-function computeVolumesAndMasses() {
-  const L = mmToM(state.L_rect);
-  const H = mmToM(state.H);
-  const W = mmToM(state.W);
-  const x = mmToM(state.x_hopper);
-  const Hf = mmToM(state.H_frame);
-  const t = mmToM(state.t_wall);
+function calculatePhysics() {
+  const L_m = params.L / 1000;
+  const W_m = params.W / 1000;
+  const H_m = params.H / 1000;
+  const xHop_m = params.x_hopper / 1000;
+  const t_m = params.t_wall / 1000;
+  const frameH_m = params.include_frame ? params.frame_h / 1000 : 0;
 
-  const L_in = Math.max(0.001, L - 2 * t);
-  const W_in = Math.max(0.001, W - 2 * t);
-  const H_in = Math.max(0.001, H - t); // open top
+  const V_rect_int = Math.max(
+    0,
+    (L_m - 2 * t_m) * (W_m - 2 * t_m) * (H_m - t_m)
+  );
+  const V_wedge_int = Math.max(
+    0,
+    0.5 * xHop_m * (H_m - t_m) * (W_m - 2 * t_m)
+  );
+  const V_total = Math.max(0, V_rect_int + V_wedge_int);
+  const V_fill = V_total * (params.fill_percent / 100);
 
-  const x_in = Math.max(0, x - t);
-  const H_tri_in = H_in;
+  const V_rect_out = L_m * W_m * H_m;
+  const V_wedge_out = 0.5 * xHop_m * H_m * W_m;
+  const V_shell_vol = Math.max(0, V_rect_out + V_wedge_out - V_total);
 
-  const V_rect_in = L_in * W_in * H_in;
-  const V_hopper_in = 0.5 * x_in * H_tri_in * W_in;
-  const V_internal = V_rect_in + V_hopper_in;
-
-  const fillFrac = Math.min(1, Math.max(0, state.fill_percentage / 100));
-  const V_fill = V_internal * fillFrac;
-
-  const V_rect_out = L * W * H;
-  const V_hopper_out = x > 0 ? 0.5 * x * H * W : 0;
-  const V_frame_out = state.include_frame ? L * W * Hf : 0;
-
-  const Wp = mmToM(state.W_pocket);
-  const Hp = mmToM(state.H_pocket);
-  const Sp = mmToM(state.S_pocket);
-  const minMargin = mmToM(20);
-  let V_pockets = 0;
-  if (state.include_frame) {
-    const availableWidth = W - 2 * minMargin;
-    if (2 * Wp + Sp <= availableWidth + 1e-6) {
-      const V_one = L * Wp * Hp;
-      V_pockets = 2 * V_one;
-    }
+  let V_frame = 0;
+  if (params.include_frame) {
+    V_frame = L_m * W_m * frameH_m * 0.4; // approximate solid fraction
   }
 
-  const V_outer = V_rect_out + V_hopper_out + V_frame_out;
-  const V_shell = Math.max(0, V_outer - V_internal - V_pockets);
-
-  const rhoShell = state.rho_shell;
-  const rhoDust = state.rho_dust;
-  const rhoLid = state.advanced_lid_material ? state.rho_lid : rhoShell;
-
-  let V_lid = 0;
-  if (state.include_lid) {
-    const tLid = mmToM(state.t_lid);
-    const areaLid = L * W;
-    const rHole = mmToM(state.r_hole);
-    const areaHole = Math.PI * rHole * rHole;
-    V_lid = Math.max(0, (areaLid - areaHole) * tLid);
+  const m_shell_only = (V_shell_vol + V_frame) * params.rho_shell;
+  let m_lid = 0;
+  if (params.include_lid) {
+    const r_m = params.r_hole / 1000;
+    const t_lid_m = params.t_lid / 1000;
+    const area_lid = (L_m + xHop_m) * W_m - Math.PI * r_m * r_m;
+    const rho =
+      params.advanced_lid_material
+        ? parseFloat(document.getElementById("num-RhoLid").value || "7850")
+        : params.rho_shell;
+    m_lid = Math.max(0, area_lid * t_lid_m * rho);
   }
 
-  const m_shell = V_shell * rhoShell;
-  const m_lid = V_lid * (state.include_lid ? rhoLid : 0);
-  const m_dust = V_fill * rhoDust;
-  const m_empty = m_shell + m_lid;
+  const m_empty = m_shell_only + m_lid;
+  const m_dust = V_fill * params.rho_dust;
   const m_total = m_empty + m_dust;
 
-  const c_rect = { x: L / 2, y: 0, z: H / 2 };
-  const c_hopper = x > 0 ? { x: -x / 3, y: 0, z: H / 3 } : null;
-  const c_frame = state.include_frame ? { x: L / 2, y: 0, z: Hf / 2 } : null;
-  const c_lid =
-    state.include_lid && V_lid > 0
-      ? { x: L / 2, y: 0, z: H + mmToM(state.t_lid) / 2 }
-      : null;
+  // CoG approx
+  const m_frame = V_frame * params.rho_shell;
+  const m_shell_no_frame = V_shell_vol * params.rho_shell;
 
-  function weightedCentroid(components) {
-    let vx = 0, vy = 0, vz = 0, vt = 0;
-    components.forEach((c) => {
-      if (!c || !c.c) return;
-      vx += c.v * c.c.x;
-      vy += c.v * c.c.y;
-      vz += c.v * c.c.z;
-      vt += c.v;
-    });
-    if (vt <= 0) return null;
-    return { x: vx / vt, y: vy / vt, z: vz / vt };
+  const y_frame = frameH_m / 2;
+  const x_frame = L_m / 2;
+  const y_shell = frameH_m + H_m / 3;
+  const x_shell = L_m / 2 + xHop_m / 5;
+
+  const y_lid = frameH_m + H_m + (params.t_lid / 1000);
+
+  const sumM_empty = m_frame + m_shell_no_frame + m_lid;
+  let cogY_e = 0;
+  let cogX_e = 0;
+  if (sumM_empty > 0) {
+    cogY_e =
+      (m_frame * y_frame +
+        m_shell_no_frame * y_shell +
+        m_lid * y_lid) /
+      sumM_empty;
+    cogX_e =
+      (m_frame * x_frame +
+        m_shell_no_frame * x_shell +
+        m_lid * x_shell) /
+      sumM_empty;
   }
 
-  const compsEmpty = [];
-  if (V_rect_out > 0) compsEmpty.push({ v: V_rect_out, c: c_rect });
-  if (V_hopper_out > 0) compsEmpty.push({ v: V_hopper_out, c: c_hopper });
-  if (V_frame_out > 0) compsEmpty.push({ v: V_frame_out, c: c_frame });
-  if (state.include_lid && V_lid > 0) compsEmpty.push({ v: V_lid, c: c_lid });
+  const y_dust =
+    frameH_m + (H_m * (params.fill_percent / 100)) / 2 + t_m / 2;
+  const x_dust = L_m / 2;
 
-  const cog_empty = weightedCentroid(compsEmpty);
-
-  let cog_dust = null;
-  if (V_fill > 0 && V_internal > 0) {
-    const z_int = H_in / 2;
-    const z_dust = z_int * fillFrac;
-    cog_dust = { x: L / 2, y: 0, z: z_dust };
+  let cogY_f = cogY_e;
+  let cogX_f = cogX_e;
+  if (m_dust > 0 && m_empty > 0) {
+    cogY_f = (m_empty * cogY_e + m_dust * y_dust) / (m_empty + m_dust);
+    cogX_f = (m_empty * cogX_e + m_dust * x_dust) / (m_empty + m_dust);
   }
 
-  let cog_filled = null;
-  if (cog_empty && cog_dust && m_dust > 0 && m_empty > 0) {
-    const M1 = m_empty, M2 = m_dust;
-    const xC = (M1 * cog_empty.x + M2 * cog_dust.x) / (M1 + M2);
-    const yC = (M1 * cog_empty.y + M2 * cog_dust.y) / (M1 + M2);
-    const zC = (M1 * cog_empty.z + M2 * cog_dust.z) / (M1 + M2);
-    cog_filled = { x: xC, y: yC, z: zC };
-  } else if (cog_empty) {
-    cog_filled = cog_empty;
-  }
+  localCoG_E.set(cogX_e * 1000, cogY_e * 1000, 0);
+  localCoG_F.set(cogX_f * 1000, cogY_f * 1000, 0);
 
-  return {
-    V_internal,
-    V_fill,
-    m_shell,
-    m_lid,
-    m_dust,
-    m_total,
-    cog_empty,
-    cog_filled,
-  };
+  document.getElementById("val-vol-int").innerText =
+    V_total.toFixed(3) + " m³";
+  document.getElementById("val-vol-fill").innerText =
+    V_fill.toFixed(3) + " m³";
+  document.getElementById("val-mass-shell").innerText =
+    (m_shell_only + m_lid).toFixed(1) + " kg";
+  document.getElementById("val-mass-dust").innerText =
+    m_dust.toFixed(1) + " kg";
+  document.getElementById("val-mass-total").innerText =
+    m_total.toFixed(1) + " kg";
+
+  document.getElementById(
+    "val-cog-empty"
+  ).innerText = `X:${cogX_e.toFixed(2)}, Y:${cogY_e.toFixed(2)}`;
+  document.getElementById(
+    "val-cog-filled"
+  ).innerText = `X:${cogX_f.toFixed(2)}, Y:${cogY_f.toFixed(2)}`;
 }
 
-function updateOutputs() {
-  const r = computeVolumesAndMasses();
-  byId("out-v-int").textContent = fmt(r.V_internal, 3);
-  byId("out-v-fill").textContent = fmt(r.V_fill, 3);
-  byId("out-m-shell").textContent = fmt(r.m_shell, 1);
-  byId("out-m-lid").textContent = fmt(r.m_lid, 1);
-  byId("out-m-dust").textContent = fmt(r.m_dust, 1);
-  byId("out-m-total").textContent = fmt(r.m_total, 1);
-
-  if (r.cog_empty) {
-    byId("out-cog-empty").textContent =
-      `(${fmt(r.cog_empty.x, 3)}, ${fmt(r.cog_empty.y, 3)}, ${fmt(r.cog_empty.z, 3)})`;
-  } else {
-    byId("out-cog-empty").textContent = "–";
-  }
-  if (r.cog_filled) {
-    byId("out-cog-filled").textContent =
-      `(${fmt(r.cog_filled.x, 3)}, ${fmt(r.cog_filled.y, 3)}, ${fmt(r.cog_filled.z, 3)})`;
-  } else {
-    byId("out-cog-filled").textContent = "–";
-  }
-
-  updateCogMarkers(r);
-}
-
-function updateCogMarkers(results) {
-  if (!results) results = computeVolumesAndMasses();
-  const { cog_empty, cog_filled } = results;
-
-  if (cogEmptyArrow) {
-    cogEmptyArrow.visible = !!(state.show_cog_empty && cog_empty);
-    if (cog_empty) {
-      cogEmptyArrow.position.set(cog_empty.x, cog_empty.y, cog_empty.z);
-    }
-  }
-
-  if (cogFilledArrow) {
-    cogFilledArrow.visible = !!(state.show_cog_filled && cog_filled);
-    if (cog_filled) {
-      cogFilledArrow.position.set(cog_filled.x, cog_filled.y, cog_filled.z);
-    }
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* Collision (container vs imported STLs)                             */
-/* ------------------------------------------------------------------ */
-
-function updateCollisions() {
+function updateCoGArrows() {
   if (!containerGroup) return;
 
-  const boxContainer = new THREE.Box3().setFromObject(containerGroup);
-  let firstIntersection = null;
+  cogArrowEmpty.visible = params.show_cog_e;
+  cogArrowFilled.visible = params.show_cog_f;
 
-  importedObjects.forEach((o) => {
-    const box = new THREE.Box3().setFromObject(o.mesh);
-    if (boxContainer.intersectsBox(box)) {
-      const inter = boxContainer.clone().intersect(box);
-      const size = new THREE.Vector3();
-      inter.getSize(size);
-      if (size.x > 0 && size.y > 0 && size.z > 0 && !firstIntersection) {
-        firstIntersection = inter;
-      }
-    }
-  });
+  const worldPosE = containerGroup.position.clone().add(localCoG_E);
+  const worldPosF = containerGroup.position.clone().add(localCoG_F);
 
-  if (firstIntersection) {
-    const size = new THREE.Vector3();
-    firstIntersection.getSize(size);
-    const center = new THREE.Vector3();
-    firstIntersection.getCenter(center);
-    const volume = size.x * size.y * size.z;
-
-    if (!collisionMarker) {
-      const geo = new THREE.BoxGeometry(1, 1, 1);
-      const mat = new THREE.MeshBasicMaterial({
-        color: 0xff4b4b,
-        transparent: true,
-        opacity: 0.35,
-      });
-      collisionMarker = new THREE.Mesh(geo, mat);
-      scene.add(collisionMarker);
-    }
-    collisionMarker.visible = true;
-    collisionMarker.position.copy(center);
-    collisionMarker.scale.set(size.x, size.y, size.z);
-
-    const eps = 1e-6;
-    if (Math.abs(volume - lastCollisionVolume) > eps) {
-      const dxmm = size.x * 1000;
-      const dymm = size.y * 1000;
-      const dzmm = size.z * 1000;
-      const vLit = volume * 1000;
-      log(
-        `Collision: ~${fmt(dxmm, 1)}×${fmt(dymm, 1)}×${fmt(
-          dzmm,
-          1
-        )} mm, ≈${fmt(vLit, 2)} L overlap`
-      );
-      lastCollisionVolume = volume;
-    }
-  } else {
-    if (collisionMarker) collisionMarker.visible = false;
-    if (lastCollisionVolume > 0) {
-      log("Collision cleared.");
-      lastCollisionVolume = 0;
-    }
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* Three.js init, selection & movement                                */
-/* ------------------------------------------------------------------ */
-
-function resetCamera() {
-  const d = 8;
-  const elev = (35 * Math.PI) / 180;
-  const az = (45 * Math.PI) / 180;
-  const x = d * Math.cos(elev) * Math.cos(az);
-  const y = d * Math.cos(elev) * Math.sin(az);
-  const z = d * Math.sin(elev);
-  camera.position.set(x, y, z);
-  camera.lookAt(2, 0, 1);
-}
-
-function initThree() {
-  const container = byId("renderer-container");
-  const width = container.clientWidth || 800;
-  const height = container.clientHeight || 600;
-
-  renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setSize(width, height);
-  renderer.setPixelRatio(window.devicePixelRatio || 1);
-  container.appendChild(renderer.domElement);
-
-  scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xf3f4f6);
-
-  const aspect = width / height;
-  const camSize = 3;
-  camera = new THREE.OrthographicCamera(
-    -camSize * aspect,
-    camSize * aspect,
-    camSize,
-    -camSize,
-    0.1,
-    100
-  );
-  resetCamera();
-
-  controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.1;
-
-  const amb = new THREE.AmbientLight(0xffffff, 0.6);
-  scene.add(amb);
-  const dir = new THREE.DirectionalLight(0xffffff, 0.9);
-  dir.position.set(3, 4, 5);
-  scene.add(dir);
-
-  const groundSize = 10;
-  const slabGeom = new THREE.BoxGeometry(groundSize, 0.1, groundSize);
-  const slabMat = new THREE.MeshStandardMaterial({
-    color: 0xe5e7eb,
-    roughness: 0.9,
-  });
-  const slab = new THREE.Mesh(slabGeom, slabMat);
-  slab.position.set(groundSize / 2 - 0.5, 0, -0.05);
-  scene.add(slab);
-
-  const grid = new THREE.GridHelper(groundSize, 20, 0xcbd5f5, 0xe5e7eb);
-  grid.position.set(groundSize / 2 - 0.5, 0, 0.001);
-  scene.add(grid);
-
-  const cubeGeom = new THREE.BoxGeometry(1, 1, 1);
-  const cubeMat = new THREE.MeshStandardMaterial({
-    color: 0x7c3aed,
-    transparent: true,
-    opacity: 0.5,
-  });
-  referenceCube = new THREE.Mesh(cubeGeom, cubeMat);
-  referenceCube.position.set(-1, -1, 0.5);
-  referenceCube.visible = state.show_reference_cube;
-  scene.add(referenceCube);
-
-  containerGroup = createContainerGroup();
-  scene.add(containerGroup);
-
-  cogEmptyArrow = new THREE.ArrowHelper(
-    new THREE.Vector3(0, 0, -1),
-    new THREE.Vector3(0, 0, 0),
-    0.8,
-    0x0ea5e9
-  );
-  cogFilledArrow = new THREE.ArrowHelper(
-    new THREE.Vector3(0, 0, -1),
-    new THREE.Vector3(0, 0, 0),
-    0.8,
-    0xf97316
-  );
-  scene.add(cogEmptyArrow);
-  scene.add(cogFilledArrow);
-  updateCogMarkers();
-
-  raycaster = new THREE.Raycaster();
-  mouse = new THREE.Vector2();
-  renderer.domElement.addEventListener("pointerdown", onPointerDown);
-
-  window.addEventListener("resize", onResize);
-  window.addEventListener("keydown", onKeyDown);
-
-  selectedObject = containerGroup;
-  refreshObjectList();
-  updateSelectionUi();
-
-  animate();
-}
-
-function onResize() {
-  if (!renderer || !camera) return;
-  const container = byId("renderer-container");
-  const w = container.clientWidth || 800;
-  const h = container.clientHeight || 600;
-  renderer.setSize(w, h);
-  const aspect = w / h;
-  const camSize = 3;
-  camera.left = -camSize * aspect;
-  camera.right = camSize * aspect;
-  camera.top = camSize;
-  camera.bottom = -camSize;
-  camera.updateProjectionMatrix();
-}
-
-function findRoot(obj) {
-  let cur = obj;
-  while (cur.parent && cur.parent !== scene) {
-    if (cur === containerGroup) return containerGroup;
-    cur = cur.parent;
-  }
-  return cur;
-}
-
-function onPointerDown(ev) {
-  const rect = renderer.domElement.getBoundingClientRect();
-  mouse.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
-  mouse.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(mouse, camera);
-  const objs = [];
-  if (containerGroup) objs.push(containerGroup);
-  importedObjects.forEach((o) => objs.push(o.mesh));
-  const hits = raycaster.intersectObjects(objs, true);
-  if (hits.length > 0) {
-    const root = findRoot(hits[0].object);
-    selectedObject = root;
-    updateSelectionUi();
-    refreshObjectList();
-    log(`Selected: ${root === containerGroup ? "Container" : root.userData.name || "Imported object"}`);
-  }
-}
-
-function onKeyDown(e) {
-  if (!selectedObject) return;
-  const key = e.key.toLowerCase();
-  if (!["w", "a", "s", "d"].includes(key)) return;
-  e.preventDefault();
-
-  const step = mmToM(state.move_step_mm);
-  const pos = selectedObject.position.clone();
-  if (key === "w") pos.y += step;
-  if (key === "s") pos.y -= step;
-  if (key === "a") pos.x -= step;
-  if (key === "d") pos.x += step;
-
-  if (state.snap_to_grid) {
-    const gs = mmToM(100);
-    pos.x = Math.round(pos.x / gs) * gs;
-    pos.y = Math.round(pos.y / gs) * gs;
-  }
-  selectedObject.position.copy(pos);
-}
-
-function animate() {
-  requestAnimationFrame(animate);
-  if (controls) controls.update();
-  if (renderer && scene && camera) renderer.render(scene, camera);
-  updateCollisions();
-}
-
-/* ------------------------------------------------------------------ */
-/* Layers / selection UI                                              */
-/* ------------------------------------------------------------------ */
-
-function setBaseFace(mesh, mode) {
-  const box = new THREE.Box3().setFromObject(mesh);
-  const center = new THREE.Vector3();
-  const size = new THREE.Vector3();
-  box.getCenter(center);
-  box.getSize(size);
-  const minZ = box.min.z;
-  const maxZ = box.max.z;
-  let baseZ;
-  if (mode === "bottom") baseZ = minZ;
-  else if (mode === "top") baseZ = maxZ;
-  else baseZ = center.z;
-  const delta = -baseZ;
-  mesh.position.z += delta;
-  mesh.userData.baseFace = mode;
-}
-
-function refreshObjectList() {
-  const list = objectListEl || byId("object-list");
-  if (!list) return;
-  list.innerHTML = "";
-
-  const makeEntry = (label, obj) => {
-    const div = document.createElement("div");
-    div.textContent = label;
-    div.style.cursor = "pointer";
-    div.style.padding = "2px 4px";
-    div.style.fontSize = "11px";
-    if (selectedObject === obj) {
-      div.style.background = "#e5edff";
-    }
-    div.addEventListener("click", () => {
-      selectedObject = obj;
-      updateSelectionUi();
-      refreshObjectList();
-      log(`Selected: ${label} (via list)`);
-    });
-    list.appendChild(div);
-  };
-
-  if (containerGroup) {
-    makeEntry("Container", containerGroup);
-  }
-  importedObjects.forEach((o, idx) => {
-    makeEntry(o.name || `Imported ${idx + 1}`, o.mesh);
-  });
-}
-
-function updateSelectionUi() {
-  if (!selectedObject) selectedObject = containerGroup;
-  const nameEl = selectedNameEl || byId("selected-object-name");
-  const baseSel = baseFaceSelectEl || byId("select-base-face");
-  if (!nameEl || !baseSel) return;
-
-  if (selectedObject === containerGroup || !selectedObject) {
-    nameEl.textContent = "Container";
-    baseSel.disabled = true;
-  } else {
-    const obj = importedObjects.find((o) => o.mesh === selectedObject);
-    nameEl.textContent = obj ? obj.name || "Imported object" : "Object";
-    baseSel.disabled = !obj;
-    if (obj) {
-      baseSel.value = obj.mesh.userData.baseFace || "bottom";
-    }
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* STL import/export                                                  */
-/* ------------------------------------------------------------------ */
-
-function importSTL(file) {
-  if (!file) return;
-  const maxSize = 15 * 1024 * 1024;
-  if (file.size > maxSize) {
-    const ok = confirm(
-      `File is ${(file.size / 1024 / 1024).toFixed(1)} MB – may slow the browser. Continue?`
-    );
-    if (!ok) return;
-  }
-
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    const geom = loader.parse(e.target.result);
-    const mat = new THREE.MeshStandardMaterial({
-      color: 0x6b7280,
-      metalness: 0.1,
-      roughness: 0.7,
-    });
-    const mesh = new THREE.Mesh(geom, mat);
-    mesh.geometry.computeBoundingBox();
-    const box = new THREE.Box3().setFromObject(mesh);
-    const size = new THREE.Vector3();
-    const center = new THREE.Vector3();
-    box.getSize(size);
-    box.getCenter(center);
-    mesh.position.sub(center);
-    mesh.position.z += size.z / 2 + 0.01; // stand on ground
-    mesh.userData.baseFace = "bottom";
-    mesh.userData.name = file.name;
-
-    scene.add(mesh);
-    importedObjects.push({ mesh, name: file.name });
-    refreshObjectList();
-    log(`Imported STL: ${file.name}`);
-  };
-  reader.readAsArrayBuffer(file);
-}
-
-function exportContainer(includeLid) {
-  if (!containerGroup) return;
-  const grp = new THREE.Group();
-  containerGroup.traverse((obj) => {
-    if (obj.isMesh) grp.add(obj.clone());
-  });
-  if (includeLid && lidMesh && !containerGroup.children.includes(lidMesh)) {
-    grp.add(lidMesh.clone());
-  }
-
-  const box = new THREE.Box3().setFromObject(grp);
-  const center = new THREE.Vector3();
-  const size = new THREE.Vector3();
-  box.getCenter(center);
-  box.getSize(size);
-  const offset = new THREE.Vector3(-center.x, -center.y, -box.min.z);
-  grp.position.add(offset);
-
-  const data = exporter.parse(grp, { binary: true });
-  const blob = new Blob([data], { type: "application/octet-stream" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `container_${state.L_rect}x${state.W}x${state.H}.stl`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-  log("Exported container STL.");
-}
-
-function exportLid() {
-  if (!lidMesh || !state.include_lid) {
-    log("Lid not included – nothing to export.");
-    return;
-  }
-  const grp = new THREE.Group();
-  grp.add(lidMesh.clone());
-
-  const box = new THREE.Box3().setFromObject(grp);
-  const center = new THREE.Vector3();
-  const size = new THREE.Vector3();
-  box.getCenter(center);
-  box.getSize(size);
-  const offset = new THREE.Vector3(-center.x, -center.y, -box.min.z);
-  grp.position.add(offset);
-
-  const data = exporter.parse(grp, { binary: true });
-  const blob = new Blob([data], { type: "application/octet-stream" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `lid_${state.L_rect}x${state.W}.stl`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-  log("Exported lid STL.");
-}
-
-/* ------------------------------------------------------------------ */
-/* Config & source IO                                                 */
-/* ------------------------------------------------------------------ */
-
-function exportConfig() {
-  const json = JSON.stringify(state, null, 2);
-  navigator.clipboard
-    .writeText(json)
-    .then(() => log("Config JSON copied to clipboard."))
-    .catch(() => {
-      alert("Could not copy automatically. JSON:\n\n" + json);
-    });
-}
-
-function importConfig() {
-  const text = prompt("Paste JSON config here:");
-  if (!text) return;
-  try {
-    const parsed = JSON.parse(text);
-    const merged = Object.assign(deepClone(DEFAULTS), parsed);
-    commitState(merged, "Imported configuration.");
-  } catch {
-    alert("Invalid JSON.");
-  }
-}
-
-async function copyFullSource() {
-  try {
-    const [htmlResp, jsResp] = await Promise.all([
-      fetch(window.location.href),
-      fetch("core-app.js"),
-    ]);
-    const html = await htmlResp.text();
-    const js = await jsResp.text();
-    const combined =
-      "----- HTML START -----\n" +
-      html +
-      "\n----- HTML END -----\n\n" +
-      "----- JS START -----\n" +
-      js +
-      "\n----- JS END -----\n";
-    await navigator.clipboard.writeText(combined);
-    log("HTML+JS source copied to clipboard.");
-  } catch (e) {
-    console.warn(e);
-    alert("Failed to copy source automatically (likely CORS). Check console.");
-  }
+  cogArrowEmpty.position.copy(worldPosE);
+  cogArrowFilled.position.copy(worldPosF);
 }
 
 /* ------------------------------------------------------------------ */
 /* UI wiring                                                          */
 /* ------------------------------------------------------------------ */
 
-function hookNumber(id, handler) {
-  const el = byId(id);
-  if (!el) return;
-  el.addEventListener("change", () => {
-    const v = parseFloat(el.value);
-    if (!Number.isFinite(v)) return;
-    handler(v);
-  });
-}
-
-function hookCheck(id, handler) {
-  const el = byId(id);
-  if (!el) return;
-  el.addEventListener("change", () => handler(el.checked));
-}
-
-function bindRangeNumber(rangeId, numberId, key, msg) {
-  const rng = byId(rangeId);
-  const num = byId(numberId);
-  if (!rng || !num) return;
-
-  const apply = (v) => {
-    if (!Number.isFinite(v)) return;
-    rng.value = v;
-    num.value = v;
-    const s = deepClone(state);
-    s[key] = v;
-    commitState(s, msg);
+function setupUI() {
+  const bind = (idRange, idNum, key, cb) => {
+    const r = document.getElementById(idRange);
+    const n = document.getElementById(idNum);
+    const update = (val) => {
+      const v = parseFloat(val);
+      if (!Number.isFinite(v)) return;
+      params[key] = v;
+      if (r) r.value = v;
+      if (n) n.value = v;
+      cb();
+    };
+    if (r) {
+      r.addEventListener("input", () => update(r.value));
+      r.addEventListener("change", pushHistory);
+    }
+    if (n) {
+      n.addEventListener("change", () => {
+        update(n.value);
+        pushHistory();
+      });
+    }
   };
 
-  rng.addEventListener("input", () => {
-    const v = parseFloat(rng.value);
-    apply(v);
+  bind("inp-L", "num-L", "L", rebuildContainer);
+  bind("inp-W", "num-W", "W", rebuildContainer);
+  bind("inp-H", "num-H", "H", rebuildContainer);
+  bind("inp-XHop", "num-XHop", "x_hopper", rebuildContainer);
+  bind("inp-Thick", "num-Thick", "t_wall", rebuildContainer);
+
+  document.getElementById("chk-frame").addEventListener("change", (e) => {
+    params.include_frame = e.target.checked;
+    rebuildContainer();
+    pushHistory();
   });
-  num.addEventListener("change", () => {
-    const v = parseFloat(num.value);
-    apply(v);
+  document.getElementById("num-HFrame").addEventListener("change", (e) => {
+    params.frame_h = parseFloat(e.target.value) || params.frame_h;
+    rebuildContainer();
+    pushHistory();
   });
+
+  document
+    .getElementById("unlock-pocket")
+    .addEventListener("change", (e) => {
+      const d = !e.target.checked;
+      document.getElementById("num-WPocket").disabled = d;
+      document.getElementById("num-HPocket").disabled = d;
+      document.getElementById("num-SPocket").disabled = d;
+    });
+
+  document.getElementById("chk-lid").addEventListener("change", (e) => {
+    params.include_lid = e.target.checked;
+    rebuildContainer();
+    pushHistory();
+  });
+  document.getElementById("num-TLid").addEventListener("change", (e) => {
+    params.t_lid = parseFloat(e.target.value) || params.t_lid;
+    rebuildContainer();
+    pushHistory();
+  });
+  document.getElementById("num-RHole").addEventListener("change", (e) => {
+    params.r_hole = parseFloat(e.target.value) || params.r_hole;
+    rebuildContainer();
+    pushHistory();
+  });
+  document
+    .getElementById("num-LidOffset")
+    .addEventListener("change", (e) => {
+      params.lid_offset = parseFloat(e.target.value) || params.lid_offset;
+      rebuildContainer();
+      pushHistory();
+    });
+
+  document.getElementById("chk-lid-adv").addEventListener("change", (e) => {
+    params.advanced_lid_material = e.target.checked;
+    document.getElementById("row-lid-dens").style.display = e.target.checked
+      ? "flex"
+      : "none";
+    calculatePhysics();
+  });
+  document.getElementById("num-RhoLid").addEventListener("change", () => {
+    calculatePhysics();
+  });
+
+  document.getElementById("sel-mat").addEventListener("change", (e) => {
+    if (e.target.value !== "custom") {
+      params.rho_shell = parseFloat(e.target.value);
+    }
+    calculatePhysics();
+    pushHistory();
+  });
+
+  document.getElementById("num-RhoDust").addEventListener("change", (e) => {
+    params.rho_dust = parseFloat(e.target.value) || params.rho_dust;
+    calculatePhysics();
+    pushHistory();
+  });
+
+  document.getElementById("inp-Fill").addEventListener("input", (e) => {
+    params.fill_percent = parseFloat(e.target.value);
+    document.getElementById("lbl-Fill").innerText =
+      params.fill_percent + "%";
+    rebuildContainer();
+  });
+  document.getElementById("inp-Fill").addEventListener("change", pushHistory);
+
+  document.getElementById("num-Step").addEventListener("change", (e) => {
+    params.move_step = parseFloat(e.target.value) || params.move_step;
+  });
+  document.getElementById("chk-snap").addEventListener("change", (e) => {
+    params.snap = e.target.checked;
+  });
+  document.getElementById("chk-ref").addEventListener("change", (e) => {
+    refCube.visible = e.target.checked;
+  });
+  document.getElementById("chk-cog-e").addEventListener("change", (e) => {
+    params.show_cog_e = e.target.checked;
+  });
+  document.getElementById("chk-cog-f").addEventListener("change", (e) => {
+    params.show_cog_f = e.target.checked;
+  });
+  document.getElementById("chk-col").addEventListener("change", (e) => {
+    params.show_collisions = e.target.checked;
+    checkCollisions();
+  });
+
+  document
+    .getElementById("btn-reset-view")
+    .addEventListener("click", resetCameraView);
+
+  document
+    .getElementById("btn-export-stl")
+    .addEventListener("click", exportContainerSTL);
+  document
+    .getElementById("btn-export-lid")
+    .addEventListener("click", exportLidSTL);
+  document
+    .getElementById("btn-copy-source")
+    .addEventListener("click", copySource);
+  document.getElementById("btn-reset").addEventListener("click", () => {
+    localStorage.removeItem("dustContainerConfigV3");
+    location.reload();
+  });
+
+  document
+    .getElementById("btn-import")
+    .addEventListener("click", () =>
+      document.getElementById("file-input").click()
+    );
+  document
+    .getElementById("file-input")
+    .addEventListener("change", handleFileSelect);
+
+  document.getElementById("log-header").addEventListener("click", toggleLog);
+
+  document.getElementById("btn-undo").addEventListener("click", undo);
+  document.getElementById("btn-redo").addEventListener("click", redo);
+
+  // Collapsibles
+  const coll = document.getElementsByClassName("collapsible");
+  for (let i = 0; i < coll.length; i++) {
+    coll[i].addEventListener("click", function () {
+      this.classList.toggle("active");
+      const content = this.nextElementSibling;
+      if (content.style.maxHeight) {
+        content.style.maxHeight = null;
+      } else {
+        content.style.maxHeight = content.scrollHeight + "px";
+      }
+    });
+  }
 }
 
-function setupUI() {
-  // version labels
-  const hv = byId("html-version-label");
-  const jv = byId("js-version-label");
-  if (hv) hv.textContent = HTML_VERSION;
-  if (jv) jv.textContent = JS_VERSION;
+/* sync UI widgets from params (also used for undo/redo/load) */
+function updateUIFromParams() {
+  const set = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.value = val;
+  };
+  const check = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.checked = val;
+  };
 
-  logTextEl = byId("log-text");
-  logListEl = byId("log-list");
-  selectedNameEl = byId("selected-object-name");
-  baseFaceSelectEl = byId("select-base-face");
-  objectListEl = byId("object-list");
+  set("inp-L", params.L);
+  set("num-L", params.L);
+  set("inp-W", params.W);
+  set("num-W", params.W);
+  set("inp-H", params.H);
+  set("num-H", params.H);
+  set("inp-XHop", params.x_hopper);
+  set("num-XHop", params.x_hopper);
+  set("inp-Thick", params.t_wall);
+  set("num-Thick", params.t_wall);
 
-  // Modal buttons
-  byId("btn-error-fix").addEventListener("click", () => {
-    if (pendingFixIgnore && pendingFixIgnore.onFix) pendingFixIgnore.onFix();
-    closeModal();
-  });
-  byId("btn-error-ignore").addEventListener("click", () => {
-    if (pendingFixIgnore && pendingFixIgnore.onIgnore) pendingFixIgnore.onIgnore();
-    closeModal();
-  });
+  check("chk-frame", params.include_frame);
+  set("num-HFrame", params.frame_h);
 
-  // Log toggle
-  const logToggle = byId("log-toggle");
-  const logPanel = byId("log-panel");
-  if (logToggle && logPanel) {
-    logToggle.addEventListener("click", () => {
-      logPanel.style.display = logPanel.style.display === "block" ? "none" : "block";
-    });
+  check("chk-lid", params.include_lid);
+  set("num-TLid", params.t_lid);
+  set("num-RHole", params.r_hole);
+  set("num-LidOffset", params.lid_offset);
+  check("chk-lid-adv", params.advanced_lid_material);
+  document.getElementById("row-lid-dens").style.display =
+    params.advanced_lid_material ? "flex" : "none";
+  set("num-RhoLid", params.rho_lid);
+
+  set("num-RhoDust", params.rho_dust);
+  set("inp-Fill", params.fill_percent);
+  const lblFill = document.getElementById("lbl-Fill");
+  if (lblFill) lblFill.innerText = params.fill_percent + "%";
+
+  set("num-Step", params.move_step);
+  check("chk-snap", params.snap);
+  check("chk-ref", refCube && refCube.visible);
+  check("chk-cog-e", params.show_cog_e);
+  check("chk-cog-f", params.show_cog_f);
+  check("chk-col", params.show_collisions);
+
+  const selMat = document.getElementById("sel-mat");
+  if (selMat) {
+    if (params.rho_shell === 7850) selMat.value = "7850";
+    else if (params.rho_shell === 2700) selMat.value = "2700";
+    else selMat.value = "custom";
   }
-
-  // geometry: sliders + numbers
-  bindRangeNumber("range-l-rect", "input-l-rect", "L_rect", "Changed L_rect.");
-  bindRangeNumber("range-x-hopper", "input-x-hopper", "x_hopper", "Changed x_hopper.");
-  bindRangeNumber("range-h", "input-h", "H", "Changed H.");
-  bindRangeNumber("range-w", "input-w", "W", "Changed W.");
-  bindRangeNumber("range-t-wall", "input-t-wall", "t_wall", "Changed t_wall.");
-
-  // frame
-  hookCheck("chk-include-frame", (c) => {
-    const s = deepClone(state);
-    s.include_frame = c;
-    commitState(s, "Toggled frame.");
-  });
-  hookNumber("input-h-frame", (v) => {
-    const s = deepClone(state);
-    s.H_frame = v;
-    commitState(s, "Changed H_frame.");
-  });
-  hookCheck("chk-unlock-pockets", (c) => {
-    const s = deepClone(state);
-    s.unlock_pockets = c;
-    pocketLockUi(!c);
-    commitState(s, "Toggled pocket lock.");
-  });
-  hookNumber("input-w-pocket", (v) => {
-    const s = deepClone(state);
-    s.W_pocket = v;
-    commitState(s, "Changed pocket width.");
-  });
-  hookNumber("input-h-pocket", (v) => {
-    const s = deepClone(state);
-    s.H_pocket = v;
-    commitState(s, "Changed pocket height.");
-  });
-  hookNumber("input-s-pocket", (v) => {
-    const s = deepClone(state);
-    s.S_pocket = v;
-    commitState(s, "Changed pocket spacing.");
-  });
-
-  // lid
-  hookCheck("chk-include-lid", (c) => {
-    const s = deepClone(state);
-    s.include_lid = c;
-    commitState(s, "Toggled lid.");
-  });
-  hookNumber("input-t-lid", (v) => {
-    const s = deepClone(state);
-    s.t_lid = v;
-    commitState(s, "Changed lid thickness.");
-  });
-  hookNumber("input-r-hole", (v) => {
-    const s = deepClone(state);
-    s.r_hole = v;
-    commitState(s, "Changed lid hole radius.");
-  });
-  hookNumber("input-lid-edge", (v) => {
-    const s = deepClone(state);
-    s.lid_edge_length = v;
-    commitState(s, "Changed lid ring width.");
-  });
-  hookNumber("input-lid-offset", (v) => {
-    const s = deepClone(state);
-    s.lid_offset_from_hopper_edge = v;
-    commitState(s, "Changed lid hole offset.");
-  });
-  hookCheck("chk-advanced-lid-mat", (c) => {
-    const s = deepClone(state);
-    s.advanced_lid_material = c;
-    lidMaterialUi(c);
-    commitState(s, "Toggled advanced lid material.");
-  });
-  hookNumber("input-rho-lid", (v) => {
-    const s = deepClone(state);
-    s.rho_lid = v;
-    commitState(s, "Changed lid density.");
-  });
-
-  // materials / dust
-  const shellSel = byId("select-shell-material");
-  if (shellSel) {
-    shellSel.addEventListener("change", () => {
-      const s = deepClone(state);
-      s.shell_material = shellSel.value;
-      if (s.shell_material === "steel") s.rho_shell = 7850;
-      else if (s.shell_material === "stainless") s.rho_shell = 8000;
-      else if (s.shell_material === "aluminum") s.rho_shell = 2700;
-      state = s; // update density input before commit
-      if (s.shell_material !== "custom") {
-        byId("input-rho-shell").disabled = true;
-      } else {
-        byId("input-rho-shell").disabled = false;
-      }
-      commitState(s, "Changed shell material.");
-    });
-  }
-  hookNumber("input-rho-shell", (v) => {
-    const s = deepClone(state);
-    s.rho_shell = v;
-    s.shell_material = "custom";
-    const sel = byId("select-shell-material");
-    if (sel) sel.value = "custom";
-    byId("input-rho-shell").disabled = false;
-    commitState(s, "Changed shell density.");
-  });
-  hookNumber("input-rho-dust", (v) => {
-    const s = deepClone(state);
-    s.rho_dust = v;
-    commitState(s, "Changed dust density.");
-  });
-  hookNumber("input-humidity", (v) => {
-    const s = deepClone(state);
-    s.humidity = v;
-    commitState(s, "Changed humidity (info only).");
-  });
-  hookNumber("input-fill-perc", (v) => {
-    const s = deepClone(state);
-    s.fill_percentage = Math.max(0, Math.min(100, v));
-    commitState(s, "Changed fill percentage.");
-  });
-
-  // view & movement
-  hookCheck("chk-snap-grid", (c) => {
-    const s = deepClone(state);
-    s.snap_to_grid = c;
-    commitState(s, "Toggled snap-to-grid.");
-  });
-  hookNumber("input-move-step", (v) => {
-    const s = deepClone(state);
-    s.move_step_mm = v;
-    commitState(s, "Changed move step.");
-  });
-  hookCheck("chk-ref-cube", (c) => {
-    const s = deepClone(state);
-    s.show_reference_cube = c;
-    commitState(s, "Toggled reference cube.");
-  });
-  hookCheck("chk-show-cog-empty", (c) => {
-    const s = deepClone(state);
-    s.show_cog_empty = c;
-    commitState(s, "Toggled CoG empty.");
-  });
-  hookCheck("chk-show-cog-filled", (c) => {
-    const s = deepClone(state);
-    s.show_cog_filled = c;
-    commitState(s, "Toggled CoG filled.");
-  });
-
-  const resetViewBtn = byId("btn-reset-view");
-  if (resetViewBtn) {
-    resetViewBtn.addEventListener("click", () => {
-      resetCamera();
-      log("Reset view to isometric.");
-    });
-  }
-
-  // layers: base face selector
-  if (baseFaceSelectEl) {
-    baseFaceSelectEl.addEventListener("change", () => {
-      if (!selectedObject) return;
-      const obj = importedObjects.find((o) => o.mesh === selectedObject);
-      if (!obj) return;
-      setBaseFace(obj.mesh, baseFaceSelectEl.value);
-    });
-  }
-
-  // advanced & IO
-  byId("btn-export-config").addEventListener("click", exportConfig);
-  byId("btn-import-config").addEventListener("click", importConfig);
-  byId("btn-export-container").addEventListener("click", () =>
-    exportContainer(state.export_lid_with_container)
-  );
-  byId("btn-export-lid").addEventListener("click", exportLid);
-  hookCheck("chk-export-lid-with-container", (c) => {
-    const s = deepClone(state);
-    s.export_lid_with_container = c;
-    commitState(s, "Toggled include lid in container STL.");
-  });
-
-  const importStlInput = byId("input-import-stl");
-  if (importStlInput) {
-    importStlInput.addEventListener("change", (e) => {
-      const file = e.target.files[0];
-      if (file) importSTL(file);
-      importStlInput.value = "";
-    });
-  }
-  byId("btn-copy-source").addEventListener("click", copyFullSource);
-
-  byId("btn-reset-defaults").addEventListener("click", () => {
-    if (!confirm("Reset all parameters to defaults and clear stored config?")) return;
-    state = deepClone(DEFAULTS);
-    lastValidState = deepClone(DEFAULTS);
-    undoStack.length = 0;
-    redoStack.length = 0;
-    applyStateToInputs();
-    rebuildGeometry();
-    updateOutputs();
-    saveState();
-    updateUndoButtons();
-    log("Reset to defaults.");
-  });
-
-  byId("btn-undo").addEventListener("click", undo);
-  byId("btn-redo").addEventListener("click", redo);
-  updateUndoButtons();
 }
 
 /* ------------------------------------------------------------------ */
-/* Kickoff                                                            */
+/* Keyboard / mouse interaction                                      */
+/* ------------------------------------------------------------------ */
+
+function onKeyDown(event) {
+  if (!selectedObject) return;
+  const step = params.move_step;
+  const snapStep = params.snap ? 100 : 1;
+
+  const camDir = new THREE.Vector3();
+  camera.getWorldDirection(camDir);
+  camDir.y = 0;
+  camDir.normalize();
+
+  let forward = new THREE.Vector3(0, 0, -1);
+  if (Math.abs(camDir.x) > Math.abs(camDir.z)) {
+    forward.set(Math.sign(camDir.x), 0, 0);
+  } else {
+    forward.set(0, 0, Math.sign(camDir.z));
+  }
+
+  const right = new THREE.Vector3().crossVectors(
+    new THREE.Vector3(0, 1, 0),
+    forward
+  );
+
+  let move = new THREE.Vector3();
+
+  switch (event.key.toLowerCase()) {
+    case "w":
+      move.copy(forward).multiplyScalar(step);
+      break;
+    case "s":
+      move.copy(forward).multiplyScalar(-step);
+      break;
+    case "a":
+      move.copy(right).multiplyScalar(-step);
+      break;
+    case "d":
+      move.copy(right).multiplyScalar(step);
+      break;
+    default:
+      return;
+  }
+
+  selectedObject.position.add(move);
+  if (params.snap) {
+    selectedObject.position.x =
+      Math.round(selectedObject.position.x / snapStep) * snapStep;
+    selectedObject.position.z =
+      Math.round(selectedObject.position.z / snapStep) * snapStep;
+  }
+  checkCollisions();
+}
+
+function onCanvasClick(event) {
+  const mouse = new THREE.Vector2();
+  const rect = renderer.domElement.getBoundingClientRect();
+  mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera(mouse, camera);
+  const intersects = raycaster.intersectObjects(scene.children, true);
+
+  if (intersects.length > 0) {
+    let obj = intersects[0].object;
+    while (obj.parent && obj.parent !== scene) obj = obj.parent;
+    if (
+      obj !== gridHelper &&
+      obj !== refCube &&
+      obj !== cogArrowEmpty &&
+      obj !== cogArrowFilled &&
+      !obj.isCollisionBox
+    ) {
+      selectedObject = obj;
+      log("Selected: " + (obj.name || "Object"));
+      updateLayerList();
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Collision detection                                                */
+/* ------------------------------------------------------------------ */
+
+function checkCollisions() {
+  collisionBoxes.forEach((b) => scene.remove(b));
+  collisionBoxes = [];
+  document.getElementById("collision-alert").style.display = "none";
+
+  if (!containerGroup || !params.show_collisions) return;
+
+  const box1 = new THREE.Box3().setFromObject(containerGroup);
+
+  importedObjects.forEach((obj) => {
+    const box2 = new THREE.Box3().setFromObject(obj);
+    if (box1.intersectsBox(box2)) {
+      const intersection = box1.clone().intersect(box2);
+      const dx = intersection.max.x - intersection.min.x;
+      const dy = intersection.max.y - intersection.min.y;
+      const dz = intersection.max.z - intersection.min.z;
+      if (dx <= 0 || dy <= 0 || dz <= 0) return;
+
+      const volLitres = (dx * dy * dz) / 1_000_000; // mm³ -> L
+
+      log(`Collision detected! Vol: ${volLitres.toFixed(2)} L`);
+
+      const w = dx,
+        h = dy,
+        d = dz;
+      const cx = (intersection.min.x + intersection.max.x) / 2;
+      const cy = (intersection.min.y + intersection.max.y) / 2;
+      const cz = (intersection.min.z + intersection.max.z) / 2;
+
+      const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(w, h, d),
+        new THREE.MeshBasicMaterial({
+          color: 0xe74c3c,
+          transparent: true,
+          opacity: 0.5,
+        })
+      );
+      mesh.position.set(cx, cy, cz);
+      mesh.isCollisionBox = true;
+      scene.add(mesh);
+      collisionBoxes.push(mesh);
+
+      document.getElementById("val-col-vol").innerText =
+        volLitres.toFixed(1) + " L";
+      document.getElementById("collision-alert").style.display = "flex";
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* STL import/export                                                  */
+/* ------------------------------------------------------------------ */
+
+function handleFileSelect(evt) {
+  const file = evt.target.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = function (e) {
+    try {
+      const loader = new STLLoader();
+      const geometry = loader.parse(e.target.result);
+      geometry.center();
+      geometry.computeBoundingBox();
+      const h = geometry.boundingBox.min.y;
+      geometry.translate(0, -h, 0);
+
+      const material = new THREE.MeshStandardMaterial({ color: 0x95a5a6 });
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.name = file.name;
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.castShadow = true;
+
+      scene.add(mesh);
+      importedObjects.push(mesh);
+      updateLayerList();
+      log("Imported: " + file.name);
+    } catch (err) {
+      log("Error importing STL: " + err.message);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function exportContainerSTL() {
+  if (!containerGroup) return;
+  const exporter = new STLExporter();
+
+  const dustVis = dustMesh ? dustMesh.visible : false;
+  if (dustMesh) dustMesh.visible = false;
+
+  const result = exporter.parse(containerGroup);
+  saveString(result, "container_design.stl");
+
+  if (dustMesh) dustMesh.visible = dustVis;
+  log("Exported Container STL");
+}
+
+function exportLidSTL() {
+  if (!lidMesh) {
+    alert("No lid generated");
+    return;
+  }
+  const exporter = new STLExporter();
+  const result = exporter.parse(lidMesh);
+  saveString(result, "lid_design.stl");
+  log("Exported Lid STL");
+}
+
+function saveString(text, filename) {
+  const blob = new Blob([text], { type: "text/plain" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+}
+
+/* copy whole HTML document source (quick & dirty) */
+function copySource() {
+  const html = document.documentElement.outerHTML;
+  navigator.clipboard
+    .writeText(html)
+    .then(() => alert("Source copied!"))
+    .catch(() => alert("Copy failed (clipboard permissions)."));
+}
+
+/* ------------------------------------------------------------------ */
+/* Undo / redo & state persistence                                   */
+/* ------------------------------------------------------------------ */
+
+function pushHistory() {
+  if (isUndoRedo) return;
+  if (historyIndex < historyStack.length - 1) {
+    historyStack = historyStack.slice(0, historyIndex + 1);
+  }
+  historyStack.push(JSON.stringify(params));
+  historyIndex++;
+  if (historyStack.length > 20) {
+    historyStack.shift();
+    historyIndex--;
+  }
+}
+
+function undo() {
+  if (historyIndex > 0) {
+    historyIndex--;
+    isUndoRedo = true;
+    params = JSON.parse(historyStack[historyIndex]);
+    updateUIFromParams();
+    rebuildContainer();
+    isUndoRedo = false;
+    log("Undo performed");
+  }
+}
+
+function redo() {
+  if (historyIndex < historyStack.length - 1) {
+    historyIndex++;
+    isUndoRedo = true;
+    params = JSON.parse(historyStack[historyIndex]);
+    updateUIFromParams();
+    rebuildContainer();
+    isUndoRedo = false;
+    log("Redo performed");
+  }
+}
+
+function updateLayerList() {
+  const list = document.getElementById("layer-list");
+  list.innerHTML = "";
+  const items = [containerGroup, ...importedObjects];
+  items.forEach((obj) => {
+    if (!obj) return;
+    const div = document.createElement("div");
+    div.className =
+      "layer-item" + (selectedObject === obj ? " selected" : "");
+
+    const nameSpan = document.createElement("span");
+    nameSpan.innerText = obj.name || "Object";
+    div.appendChild(nameSpan);
+
+    const actions = document.createElement("div");
+    actions.className = "layer-actions";
+
+    const rotBtn = document.createElement("span");
+    rotBtn.className = "layer-icon";
+    rotBtn.innerText = "↻";
+    rotBtn.title = "Rotate 90° around X";
+    rotBtn.onclick = (e) => {
+      e.stopPropagation();
+      obj.rotation.x += Math.PI / 2;
+      checkCollisions();
+    };
+    actions.appendChild(rotBtn);
+
+    div.appendChild(actions);
+    div.addEventListener("click", () => {
+      selectedObject = obj;
+      updateLayerList();
+    });
+    list.appendChild(div);
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Logging & small utils                                              */
+/* ------------------------------------------------------------------ */
+
+function log(msg) {
+  const el = document.getElementById("log-content");
+  const time = new Date().toLocaleTimeString();
+  el.innerText = `[${time}] ${msg}\n` + el.innerText;
+}
+
+function toggleLog() {
+  document.getElementById("log-panel").classList.toggle("log-expanded");
+}
+
+function saveState() {
+  try {
+    localStorage.setItem("dustContainerConfigV3", JSON.stringify(params));
+  } catch {
+    // ignore
+  }
+}
+
+function loadState() {
+  const s = localStorage.getItem("dustContainerConfigV3");
+  if (s) {
+    try {
+      const p = JSON.parse(s);
+      params = { ...DEFAULTS, ...p };
+    } catch (e) {
+      console.error("Load failed", e);
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Resize + animation loop                                            */
+/* ------------------------------------------------------------------ */
+
+function onWindowResize() {
+  if (!renderer || !camera) return;
+  const container = document.getElementById("main-view");
+  const aspect = container.clientWidth / container.clientHeight || 1;
+  const d = 3000;
+  camera.left = -d * aspect;
+  camera.right = d * aspect;
+  camera.top = d;
+  camera.bottom = -d;
+  camera.updateProjectionMatrix();
+  renderer.setSize(container.clientWidth, container.clientHeight);
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  updateCoGArrows();
+  renderer.render(scene, camera);
+}
+
+/* ------------------------------------------------------------------ */
+/* Bootstrap                                                          */
 /* ------------------------------------------------------------------ */
 
 window.addEventListener("DOMContentLoaded", () => {
-  loadState();
-  applyStateToInputs();
-  setupUI();
-  initThree();
-  updateOutputs();
-  log("Application ready. Adjust parameters or import STLs to begin.");
+  init();
+  setInterval(saveState, 5000);
 });
