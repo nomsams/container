@@ -18,9 +18,7 @@
       --radius: 10px;
       --font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
-    * {
-      box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
     body {
       margin: 0;
       padding: 0;
@@ -49,7 +47,9 @@
       display: flex;
       flex-direction: column;
       gap: 8px;
-      overflow: hidden;
+      min-height: 0;
+      max-height: 100%;
+      overflow-y: auto; /* scrollable */
     }
     #canvas-panel {
       flex: 1;
@@ -65,6 +65,10 @@
     #renderer-container {
       flex: 1;
       min-height: 0;
+    }
+    #renderer-container canvas {
+      border-radius: 10px;
+      display: block;
     }
     h1 {
       font-size: 18px;
@@ -137,6 +141,7 @@
     }
     .field input[type="range"] {
       width: 100%;
+      margin-top: 2px;
     }
     .inline-checkbox {
       display: flex;
@@ -146,18 +151,14 @@
       color: var(--muted);
       margin-bottom: 4px;
     }
-    .inline-checkbox input {
-      margin: 0;
-    }
+    .inline-checkbox input { margin: 0; }
     .output-grid {
       display: grid;
       grid-template-columns: 1.1fr 1fr;
       gap: 3px 6px;
       font-size: 11px;
     }
-    .output-label {
-      color: var(--muted);
-    }
+    .output-label { color: var(--muted); }
     .output-value {
       text-align: right;
       font-variant-numeric: tabular-nums;
@@ -208,7 +209,6 @@
       background: #f8fafc;
       cursor: pointer;
     }
-    /* Modal for Fix / Ignore */
     #error-modal {
       position: fixed;
       inset: 0;
@@ -256,7 +256,6 @@
     #error-modal button.ignore {
       background: #f9fafb;
     }
-    /* Quick log list (optional) */
     #log-panel {
       position: absolute;
       left: 8px;
@@ -292,20 +291,20 @@
       font-size: 11px;
       color: var(--accent);
     }
-    #log-toggle:hover {
-      text-decoration: underline;
-    }
-    #renderer-container canvas {
-      border-radius: 10px;
-    }
+    #log-toggle:hover { text-decoration: underline; }
     .version-labels {
       font-size: 10px;
       color: var(--muted);
       text-align: right;
     }
+    #objects-list {
+      font-size: 11px;
+    }
+    #objects-list-row {
+      display: flex;
+    }
   </style>
 
-  <!-- Three.js & helpers (ES modules) -->
   <script type="module" src="core-app.js"></script>
 </head>
 <body>
@@ -318,53 +317,66 @@
         </span>
       </h1>
 
+      <!-- GEOMETRY -->
       <div class="section" id="section-geometry">
         <div class="section-header">
           <span>Container Geometry (mm)</span>
         </div>
+
         <div class="field">
           <label for="input-l-rect">Rectangular length L_rect</label>
           <div class="field-row">
             <input type="number" id="input-l-rect" min="500" max="6000" step="10" />
           </div>
+          <input type="range" id="range-l-rect" min="500" max="6000" step="10" />
         </div>
+
         <div class="field">
           <label for="input-x-hopper">Wedge length x_hopper</label>
           <div class="field-row">
             <input type="number" id="input-x-hopper" min="0" max="6000" step="10" />
           </div>
+          <input type="range" id="range-x-hopper" min="0" max="6000" step="10" />
         </div>
+
         <div class="field">
           <label for="input-h">Height H</label>
           <div class="field-row">
             <input type="number" id="input-h" min="300" max="6000" step="10" />
           </div>
+          <input type="range" id="range-h" min="300" max="6000" step="10" />
         </div>
+
         <div class="field">
           <label for="input-w">Width W</label>
           <div class="field-row">
             <input type="number" id="input-w" min="300" max="6000" step="10" />
           </div>
+          <input type="range" id="range-w" min="300" max="6000" step="10" />
         </div>
+
         <div class="field">
           <label for="input-t-wall">Wall thickness t_wall</label>
           <div class="field-row">
             <input type="number" id="input-t-wall" min="2" max="50" step="1" />
           </div>
+          <input type="range" id="range-t-wall" min="2" max="50" step="1" />
         </div>
       </div>
 
+      <!-- FRAME -->
       <div class="section" id="section-frame">
         <div class="section-header">
           <span>Forklift Frame & Pockets</span>
         </div>
         <div class="inline-checkbox">
-          <input type="checkbox" id="chk-include-frame" checked />
+          <input type="checkbox" id="chk-include-frame" />
           <label for="chk-include-frame">Include forklift frame</label>
         </div>
         <div class="field">
           <label for="input-h-frame">Frame height H_frame</label>
           <input type="number" id="input-h-frame" min="30" max="400" step="5" />
+          <input type="range" id="range-h-frame" min="30" max="400" step="5" />
         </div>
         <div class="inline-checkbox">
           <input type="checkbox" id="chk-unlock-pockets" />
@@ -384,6 +396,7 @@
         </div>
       </div>
 
+      <!-- LID -->
       <div class="section" id="section-lid">
         <div class="section-header">
           <span>Lid (Top Cover)</span>
@@ -395,14 +408,17 @@
         <div class="field">
           <label for="input-t-lid">Lid thickness t_lid (mm)</label>
           <input type="number" id="input-t-lid" min="1" max="20" step="1" />
+          <input type="range" id="range-t-lid" min="1" max="20" step="1" />
         </div>
         <div class="field">
           <label for="input-r-hole">Lid hole radius (mm)</label>
           <input type="number" id="input-r-hole" min="20" max="800" step="5" />
+          <input type="range" id="range-r-hole" min="20" max="800" step="5" />
         </div>
         <div class="field">
           <label for="input-lid-edge">Lid edge length (ring width) (mm)</label>
           <input type="number" id="input-lid-edge" min="20" max="800" step="5" />
+          <input type="range" id="range-lid-edge" min="20" max="800" step="5" />
         </div>
         <div class="field">
           <label for="input-lid-offset">Hole offset from hopper edge (mm)</label>
@@ -418,6 +434,7 @@
         </div>
       </div>
 
+      <!-- MATERIALS -->
       <div class="section" id="section-material">
         <div class="section-header">
           <span>Materials & Dust</span>
@@ -434,10 +451,12 @@
         <div class="field">
           <label for="input-rho-shell">Shell density ρ_shell (kg/m³)</label>
           <input type="number" id="input-rho-shell" min="500" max="25000" step="50" />
+          <input type="range" id="range-rho-shell" min="500" max="25000" step="50" />
         </div>
         <div class="field">
           <label for="input-rho-dust">Dust density ρ_dust (kg/m³)</label>
           <input type="number" id="input-rho-dust" min="500" max="4000" step="10" />
+          <input type="range" id="range-rho-dust" min="500" max="4000" step="10" />
         </div>
         <div class="field">
           <label for="input-humidity">Humidity (%)</label>
@@ -446,12 +465,14 @@
         <div class="field">
           <label for="input-fill-perc">Fill percentage (%)</label>
           <input type="number" id="input-fill-perc" min="0" max="100" step="1" />
+          <input type="range" id="range-fill-perc" min="0" max="100" step="1" />
         </div>
         <div style="font-size:10px;color:var(--muted);margin-top:2px;">
-          Hint: density assumes 0% humidity. Hover info in app can explain Swedish humidity impact.
+          Density assumes 0% humidity. A tooltip / info box can later explain how Swedish humidity affects bulk density.
         </div>
       </div>
 
+      <!-- OUTPUT -->
       <div class="section" id="section-output">
         <div class="section-header">
           <span>Results (live)</span>
@@ -476,33 +497,57 @@
         </div>
       </div>
 
+      <!-- VIEW & MOVEMENT -->
       <div class="section" id="section-view">
         <div class="section-header">
           <span>View & Movement</span>
           <button class="toggle" id="btn-reset-view">Reset view</button>
         </div>
         <div class="inline-checkbox">
-          <input type="checkbox" id="chk-snap-grid" checked />
+          <input type="checkbox" id="chk-snap-grid" />
           <label for="chk-snap-grid">Snap movement to grid</label>
         </div>
         <div class="field">
           <label for="input-move-step">Move step (mm)</label>
           <input type="number" id="input-move-step" min="1" max="1000" step="1" />
+          <input type="range" id="range-move-step" min="1" max="1000" step="1" />
         </div>
         <div class="inline-checkbox">
           <input type="checkbox" id="chk-ref-cube" />
           <label for="chk-ref-cube">Show 1m reference cube</label>
         </div>
         <div class="inline-checkbox">
-          <input type="checkbox" id="chk-show-cog-empty" checked />
+          <input type="checkbox" id="chk-free-orbit" />
+          <label for="chk-free-orbit">Free orbit (drag to rotate)</label>
+        </div>
+        <div class="inline-checkbox">
+          <input type="checkbox" id="chk-show-cog-empty" />
           <label for="chk-show-cog-empty">Show CoG (empty)</label>
         </div>
         <div class="inline-checkbox">
-          <input type="checkbox" id="chk-show-cog-filled" checked />
+          <input type="checkbox" id="chk-show-cog-filled" />
           <label for="chk-show-cog-filled">Show CoG (filled)</label>
         </div>
       </div>
 
+      <!-- OBJECTS / LAYERS -->
+      <div class="section" id="section-objects">
+        <div class="section-header">
+          <span>Objects / Layers</span>
+        </div>
+        <div id="objects-list"></div>
+        <div class="field-row" style="margin-top:4px;align-items:center;flex-wrap:wrap;gap:4px;">
+          <label for="select-anchor-face" style="font-size:11px;color:var(--muted);">Anchor (selected)</label>
+          <select id="select-anchor-face" style="font-size:11px;">
+            <option value="bottom">Bottom</option>
+            <option value="center">Center</option>
+            <option value="top">Top</option>
+          </select>
+          <button class="small-btn" id="btn-apply-anchor">Apply</button>
+        </div>
+      </div>
+
+      <!-- ADVANCED -->
       <div class="section" id="section-advanced">
         <div class="section-header">
           <span>Advanced & IO</span>
@@ -528,16 +573,18 @@
       </div>
 
       <div class="version-labels">
-        Scene: WASD to move selected object · Click to select · Scroll to zoom · Drag to orbit
+        Scene: WASD to move selected · Click to select · Scroll to zoom · Drag to orbit (if enabled)
       </div>
     </div>
 
     <div id="canvas-panel">
       <div id="renderer-container"></div>
+
       <div id="log-panel">
         <h4>Event log</h4>
         <ul id="log-list"></ul>
       </div>
+
       <div id="bottom-bar">
         <div id="log-text">Ready.</div>
         <span id="log-toggle">Log</span>
@@ -549,7 +596,7 @@
     </div>
   </div>
 
-  <!-- Error modal for Fix / Ignore -->
+  <!-- Fix/Ignore modal -->
   <div id="error-modal">
     <div class="inner">
       <h3>Parameter issue</h3>
