@@ -1,23 +1,46 @@
-// core-app.js
-// Main logic for Dust Container Designer
-// Uses Three.js ES modules via CDN
+// core-app.js – Dust Container Designer PRO
+// Pure front-end. Three.js + helpers from CDN.
 
 import * as THREE from "https://unpkg.com/three@0.162.0/build/three.module.js";
 import { OrbitControls } from "https://unpkg.com/three@0.162.0/examples/jsm/controls/OrbitControls.js";
 import { STLLoader } from "https://unpkg.com/three@0.162.0/examples/jsm/loaders/STLLoader.js";
 import { STLExporter } from "https://unpkg.com/three@0.162.0/examples/jsm/exporters/STLExporter.js";
 
+/* ------------------------------------------------------------------ */
+/* Helpers                                                            */
+/* ------------------------------------------------------------------ */
+
 const HTML_VERSION = "1.0.0";
-const JS_VERSION = "1.0.0";
-const LOCAL_STORAGE_KEY = "dustContainerConfigV1";
+const JS_VERSION = "1.1.0";
+const STORAGE_KEY = "dustContainerConfigV1";
+
+function deepClone(obj) {
+  return JSON.parse(JSON.stringify(obj));
+}
+function mmToM(mm) {
+  return mm / 1000;
+}
+function fmt(v, d) {
+  if (v == null || Number.isNaN(v)) return "–";
+  return v.toFixed(d);
+}
+function byId(id) {
+  return document.getElementById(id);
+}
+
+/* ------------------------------------------------------------------ */
+/* Default state                                                      */
+/* ------------------------------------------------------------------ */
 
 const DEFAULTS = {
+  // main geometry
   L_rect: 1400,
   x_hopper: 700,
   H: 900,
   W: 1300,
   t_wall: 5,
 
+  // frame & pockets
   include_frame: true,
   H_frame: 100,
   W_pocket: 230,
@@ -25,6 +48,7 @@ const DEFAULTS = {
   S_pocket: 142,
   unlock_pockets: false,
 
+  // lid
   include_lid: false,
   t_lid: 3,
   r_hole: 200,
@@ -33,55 +57,56 @@ const DEFAULTS = {
   advanced_lid_material: false,
   rho_lid: 7850,
 
+  // materials & dust
   shell_material: "steel",
   rho_shell: 7850,
   rho_dust: 1850,
   humidity: 0,
   fill_percentage: 80,
 
+  // view & movement
   snap_to_grid: true,
   move_step_mm: 50,
   show_reference_cube: false,
   show_cog_empty: true,
   show_cog_filled: true,
 
+  // export
   export_lid_with_container: false,
 };
 
-let state = structuredClone(DEFAULTS);
-let lastValidState = structuredClone(DEFAULTS);
+let state = deepClone(DEFAULTS);
+let lastValidState = deepClone(DEFAULTS);
 
-// Undo / redo stacks
 const undoStack = [];
 const redoStack = [];
 
-// Three.js globals
-let renderer, scene, camera, controls;
-let containerGroup, lidMesh, frameGroup;
-let referenceCube;
-let cogEmptyArrow, cogFilledArrow;
-let importedObjects = []; // { mesh, name }
-let selectedObject = null;
+/* ------------------------------------------------------------------ */
+/* Three.js globals                                                   */
+/* ------------------------------------------------------------------ */
 
+let renderer, scene, camera, controls;
+let containerGroup, lidMesh, frameMesh, referenceCube;
+let cogEmptyArrow, cogFilledArrow;
+const importedObjects = []; // { mesh, name }
+let collisionMarker = null;
+let lastCollisionVolume = 0;
+
+// selection & UI
+let raycaster, mouse;
+let selectedObject = null;
+let logTextEl, logListEl;
+let selectedNameEl, baseFaceSelectEl, objectListEl;
+let pendingFixIgnore = null;
+
+// STL
 const loader = new STLLoader();
 const exporter = new STLExporter();
 
-let logListEl;
-let logTextEl;
+/* ------------------------------------------------------------------ */
+/* Logging & modal                                                    */
+/* ------------------------------------------------------------------ */
 
-// Modal data
-let pendingInvalid = null;
-
-// Utility
-function mmToM(mm) {
-  return mm / 1000;
-}
-function formatNumber(value, decimals) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "–";
-  return value.toFixed(decimals);
-}
-
-// Logging
 function log(msg) {
   const ts = new Date().toLocaleTimeString();
   if (logTextEl) logTextEl.textContent = `${ts} – ${msg}`;
@@ -89,131 +114,100 @@ function log(msg) {
     const li = document.createElement("li");
     li.textContent = `${ts} – ${msg}`;
     logListEl.prepend(li);
-    const max = 100;
-    while (logListEl.children.length > max) {
+    while (logListEl.children.length > 200) {
       logListEl.removeChild(logListEl.lastChild);
     }
   }
 }
 
-// State helpers
-function getCurrentState() {
-  return structuredClone(state);
-}
-function applyStateToInputs() {
-  // Main geometry
-  setInputValue("input-l-rect", state.L_rect);
-  setInputValue("input-x-hopper", state.x_hopper);
-  setInputValue("input-h", state.H);
-  setInputValue("input-w", state.W);
-  setInputValue("input-t-wall", state.t_wall);
-
-  // Frame
-  setCheckbox("chk-include-frame", state.include_frame);
-  setInputValue("input-h-frame", state.H_frame);
-  setCheckbox("chk-unlock-pockets", state.unlock_pockets);
-  setInputValue("input-w-pocket", state.W_pocket);
-  setInputValue("input-h-pocket", state.H_pocket);
-  setInputValue("input-s-pocket", state.S_pocket);
-  setPocketLocked(!state.unlock_pockets);
-
-  // Lid
-  setCheckbox("chk-include-lid", state.include_lid);
-  setInputValue("input-t-lid", state.t_lid);
-  setInputValue("input-r-hole", state.r_hole);
-  setInputValue("input-lid-edge", state.lid_edge_length);
-  setInputValue("input-lid-offset", state.lid_offset_from_hopper_edge);
-  setCheckbox("chk-advanced-lid-mat", state.advanced_lid_material);
-  setInputValue("input-rho-lid", state.rho_lid);
-  setLidMaterialInputsEnabled(state.advanced_lid_material);
-
-  // Materials
-  const shellSel = document.getElementById("select-shell-material");
-  if (shellSel) shellSel.value = state.shell_material;
-  setInputValue("input-rho-shell", state.rho_shell);
-  setInputValue("input-rho-dust", state.rho_dust);
-  setInputValue("input-humidity", state.humidity);
-  setInputValue("input-fill-perc", state.fill_percentage);
-
-  // View & movement
-  setCheckbox("chk-snap-grid", state.snap_to_grid);
-  setInputValue("input-move-step", state.move_step_mm);
-  setCheckbox("chk-ref-cube", state.show_reference_cube);
-  setCheckbox("chk-show-cog-empty", state.show_cog_empty);
-  setCheckbox("chk-show-cog-filled", state.show_cog_filled);
-
-  setCheckbox("chk-export-lid-with-container", state.export_lid_with_container);
-
-  updateShellDensityByMaterial(false);
-}
-
-function setInputValue(id, v) {
-  const el = document.getElementById(id);
-  if (el) el.value = v;
-}
-function setCheckbox(id, checked) {
-  const el = document.getElementById(id);
-  if (el) el.checked = !!checked;
-}
-
-function setPocketLocked(locked) {
-  ["input-w-pocket", "input-h-pocket", "input-s-pocket"].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) el.disabled = locked;
-  });
-}
-function setLidMaterialInputsEnabled(enabled) {
-  const el = document.getElementById("input-rho-lid");
-  if (el) el.disabled = !enabled;
-}
-
-function loadStateFromLocalStorage() {
-  try {
-    const raw = window.localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      state = Object.assign(structuredClone(DEFAULTS), parsed);
-      lastValidState = structuredClone(state);
-      log("Loaded config from localStorage.");
-    } else {
-      log("Using default configuration.");
-    }
-  } catch (e) {
-    console.warn("Failed to load state from localStorage", e);
-    state = structuredClone(DEFAULTS);
-    lastValidState = structuredClone(DEFAULTS);
-  }
-}
-function saveStateToLocalStorage() {
-  try {
-    window.localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(state));
-  } catch (e) {
-    console.warn("Failed to save state to localStorage", e);
-  }
-}
-
-// Validation and Fix/Ignore modal
-function openErrorModal(message, fixText, onFix, onIgnore) {
-  const modal = document.getElementById("error-modal");
-  const msgEl = document.getElementById("error-message");
-  const fixEl = document.getElementById("error-fix-text");
-  if (!modal || !msgEl || !fixEl) return;
-  msgEl.textContent = message;
-  fixEl.textContent = fixText || "";
-  pendingInvalid = { onFix, onIgnore };
+function showModal(message, fixText, onFix, onIgnore) {
+  const modal = byId("error-modal");
+  if (!modal) return;
+  byId("error-message").textContent = message;
+  byId("error-fix-text").textContent = fixText || "";
+  pendingFixIgnore = { onFix, onIgnore };
   modal.style.display = "flex";
 }
-function closeErrorModal() {
-  const modal = document.getElementById("error-modal");
+function closeModal() {
+  const modal = byId("error-modal");
   if (modal) modal.style.display = "none";
-  pendingInvalid = null;
+  pendingFixIgnore = null;
 }
 
-function validateState(candidate) {
-  // Returns { ok, message, fix, fields }.
-  const c = candidate;
+/* ------------------------------------------------------------------ */
+/* State load/save & undo/redo                                        */
+/* ------------------------------------------------------------------ */
 
-  // Basic positive checks
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      state = Object.assign(deepClone(DEFAULTS), parsed);
+      lastValidState = deepClone(state);
+      log("Loaded previous config.");
+      return;
+    }
+  } catch (e) {
+    console.warn("Failed to load state", e);
+  }
+  state = deepClone(DEFAULTS);
+  lastValidState = deepClone(DEFAULTS);
+  log("Using default config.");
+}
+function saveState() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch (e) {
+    console.warn("Failed to save state", e);
+  }
+}
+
+function pushUndo() {
+  undoStack.push(deepClone(state));
+  if (undoStack.length > 50) undoStack.shift();
+  redoStack.length = 0;
+  updateUndoButtons();
+}
+function undo() {
+  if (!undoStack.length) return;
+  const prev = undoStack.pop();
+  redoStack.push(deepClone(state));
+  state = prev;
+  lastValidState = deepClone(state);
+  applyStateToInputs();
+  rebuildGeometry();
+  updateOutputs();
+  saveState();
+  updateUndoButtons();
+  log("Undo.");
+}
+function redo() {
+  if (!redoStack.length) return;
+  const next = redoStack.pop();
+  undoStack.push(deepClone(state));
+  state = next;
+  lastValidState = deepClone(state);
+  applyStateToInputs();
+  rebuildGeometry();
+  updateOutputs();
+  saveState();
+  updateUndoButtons();
+  log("Redo.");
+}
+function updateUndoButtons() {
+  const u = byId("btn-undo");
+  const r = byId("btn-redo");
+  if (u) u.disabled = undoStack.length === 0;
+  if (r) r.disabled = redoStack.length === 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Validation                                                         */
+/* ------------------------------------------------------------------ */
+
+function validateCandidate(c) {
+  // Basic >0 checks
   if (c.L_rect <= 0 || c.H <= 0 || c.W <= 0 || c.t_wall <= 0) {
     return {
       ok: false,
@@ -228,16 +222,40 @@ function validateState(candidate) {
     };
   }
 
-  // Wall thickness vs width
+  // Wall thickness vs cavity
   const maxWall = Math.min(c.W, c.L_rect) / 4;
-  if (c.t_wall * 2 >= c.W || c.t_wall * 2 >= c.L_rect) {
+  if (2 * c.t_wall >= c.W || 2 * c.t_wall >= c.L_rect) {
     return {
       ok: false,
-      message: "Wall thickness is too large compared to width/length; inner cavity would collapse.",
+      message: "Wall thickness too large relative to width/length – inner cavity would collapse.",
       fix: () => {
         c.t_wall = Math.max(2, Math.floor(maxWall));
       },
       fields: ["input-t-wall"],
+    };
+  }
+
+  // Hopper length can't exceed rectangular length
+  if (c.x_hopper < 0 || c.x_hopper > c.L_rect) {
+    return {
+      ok: false,
+      message: "x_hopper must be between 0 and L_rect (wedge cannot be longer than the rectangular part).",
+      fix: () => {
+        c.x_hopper = Math.max(0, Math.min(c.x_hopper, c.L_rect));
+      },
+      fields: ["input-x-hopper", "input-l-rect"],
+    };
+  }
+
+  // Frame height should not exceed container
+  if (c.include_frame && c.H_frame >= c.H) {
+    return {
+      ok: false,
+      message: "Frame height H_frame should be smaller than container height H.",
+      fix: () => {
+        c.H_frame = Math.max(30, Math.floor(c.H / 3));
+      },
+      fields: ["input-h-frame", "input-h"],
     };
   }
 
@@ -249,10 +267,9 @@ function validateState(candidate) {
       return {
         ok: false,
         message:
-          "Forklift pockets plus spacing require more width than available. Either reduce pocket size/spacing or increase container width.",
+          "Forklift pockets + spacing need more width than available. Reduce pocket width/spacing or increase container width.",
         fix: () => {
           const available = c.W - 2 * minMargin;
-          // Keep spacing, shrink pockets equally
           const newPocket = Math.max(50, Math.floor((available - c.S_pocket) / 2));
           c.W_pocket = newPocket;
         },
@@ -261,17 +278,17 @@ function validateState(candidate) {
     }
   }
 
-  // Lid: hole + edge must fit
+  // Lid hole + edge must fit
   if (c.include_lid) {
-    const maxRadiusByWidth = (c.W / 2) - c.lid_edge_length;
-    const maxRadiusByLength = (c.L_rect / 2) - c.lid_edge_length;
-    const maxAllow = Math.max(20, Math.min(maxRadiusByWidth, maxRadiusByLength));
-    if (c.r_hole > maxAllow) {
+    const maxRByW = c.W / 2 - c.lid_edge_length;
+    const maxRByL = c.L_rect / 2 - c.lid_edge_length;
+    const maxR = Math.max(20, Math.min(maxRByW, maxRByL));
+    if (c.r_hole > maxR) {
       return {
         ok: false,
-        message: "Lid hole radius too large relative to lid edge; ring thickness would be negative.",
+        message: "Lid hole radius too large; ring edge would become negative.",
         fix: () => {
-          c.r_hole = maxAllow;
+          c.r_hole = maxR;
         },
         fields: ["input-r-hole", "input-lid-edge"],
       };
@@ -281,104 +298,199 @@ function validateState(candidate) {
   return { ok: true };
 }
 
-function markInvalidFields(fields) {
-  const all = document.querySelectorAll("input");
-  all.forEach((el) => el.classList.remove("invalid"));
+function markInvalid(fields) {
+  document.querySelectorAll("input").forEach((el) => el.classList.remove("invalid"));
   if (!fields) return;
   fields.forEach((id) => {
-    const el = document.getElementById(id);
+    const el = byId(id);
     if (el) el.classList.add("invalid");
   });
 }
 
-// Commit state after validation and geometry update
-function commitState(newState, logMsg = "Updated parameters.") {
-  // Validate
-  const cand = structuredClone(newState);
-  const v = validateState(cand);
+function commitState(newState, msg) {
+  const candidate = deepClone(newState);
+  const v = validateCandidate(candidate);
   if (!v.ok) {
-    // highlight
-    markInvalidFields(v.fields);
-    openErrorModal(
+    markInvalid(v.fields);
+    showModal(
       v.message,
-      "Click Fix to auto-correct values; Ignore to keep values but keep previous geometry.",
+      "Fix will auto-correct values. Ignore keeps the last valid geometry.",
       () => {
-        // Fix
         v.fix && v.fix();
-        markInvalidFields([]);
-        // Update inputs & recalc with fixed values
-        state = cand;
-        lastValidState = structuredClone(state);
-        pushUndoState();
+        state = candidate;
+        lastValidState = deepClone(candidate);
+        markInvalid([]);
+        pushUndo();
         applyStateToInputs();
-        rebuildSceneGeometry();
+        rebuildGeometry();
         updateOutputs();
-        saveStateToLocalStorage();
-        log("Auto-fix applied after invalid parameters.");
+        saveState();
+        log("Auto-fix applied.");
       },
       () => {
-        // Ignore: keep visual but revert to lastValidState internally
-        state = structuredClone(lastValidState);
+        state = deepClone(lastValidState);
         applyStateToInputs();
+        markInvalid([]);
         log("Invalid parameters ignored; geometry unchanged.");
       }
     );
     return;
   }
 
-  // OK
-  markInvalidFields([]);
-  // Save previous state for undo
-  pushUndoState();
-  redoStack.length = 0;
-  state = cand;
-  lastValidState = structuredClone(state);
+  markInvalid([]);
+  pushUndo();
+  state = candidate;
+  lastValidState = deepClone(candidate);
   applyStateToInputs();
-  rebuildSceneGeometry();
+  rebuildGeometry();
   updateOutputs();
-  saveStateToLocalStorage();
-  updateUndoRedoButtons();
-  log(logMsg);
+  saveState();
+  log(msg || "Updated parameters.");
 }
 
-function pushUndoState() {
-  undoStack.push(structuredClone(state));
-  if (undoStack.length > 50) undoStack.shift();
+/* ------------------------------------------------------------------ */
+/* Apply state -> inputs                                              */
+/* ------------------------------------------------------------------ */
+
+function setVal(id, v) {
+  const el = byId(id);
+  if (el) el.value = v;
 }
-function undo() {
-  if (!undoStack.length) return;
-  const prev = undoStack.pop();
-  redoStack.push(structuredClone(state));
-  state = prev;
-  lastValidState = structuredClone(state);
-  applyStateToInputs();
-  rebuildSceneGeometry();
-  updateOutputs();
-  saveStateToLocalStorage();
-  updateUndoRedoButtons();
-  log("Undo.");
+function setChecked(id, v) {
+  const el = byId(id);
+  if (el) el.checked = !!v;
 }
-function redo() {
-  if (!redoStack.length) return;
-  const next = redoStack.pop();
-  undoStack.push(structuredClone(state));
-  state = next;
-  lastValidState = structuredClone(state);
-  applyStateToInputs();
-  rebuildSceneGeometry();
-  updateOutputs();
-  saveStateToLocalStorage();
-  updateUndoRedoButtons();
-  log("Redo.");
+function pocketLockUi(locked) {
+  ["input-w-pocket", "input-h-pocket", "input-s-pocket"].forEach((id) => {
+    const el = byId(id);
+    if (el) el.disabled = locked;
+  });
 }
-function updateUndoRedoButtons() {
-  const undoBtn = document.getElementById("btn-undo");
-  const redoBtn = document.getElementById("btn-redo");
-  if (undoBtn) undoBtn.disabled = undoStack.length === 0;
-  if (redoBtn) redoBtn.disabled = redoStack.length === 0;
+function lidMaterialUi(enabled) {
+  const el = byId("input-rho-lid");
+  if (el) el.disabled = !enabled;
 }
 
-// Geometry building
+function applyStateToInputs() {
+  // geometry
+  setVal("input-l-rect", state.L_rect);
+  setVal("range-l-rect", state.L_rect);
+  setVal("input-x-hopper", state.x_hopper);
+  setVal("range-x-hopper", state.x_hopper);
+  setVal("input-h", state.H);
+  setVal("range-h", state.H);
+  setVal("input-w", state.W);
+  setVal("range-w", state.W);
+  setVal("input-t-wall", state.t_wall);
+  setVal("range-t-wall", state.t_wall);
+
+  // frame
+  setChecked("chk-include-frame", state.include_frame);
+  setVal("input-h-frame", state.H_frame);
+  setChecked("chk-unlock-pockets", state.unlock_pockets);
+  setVal("input-w-pocket", state.W_pocket);
+  setVal("input-h-pocket", state.H_pocket);
+  setVal("input-s-pocket", state.S_pocket);
+  pocketLockUi(!state.unlock_pockets);
+
+  // lid
+  setChecked("chk-include-lid", state.include_lid);
+  setVal("input-t-lid", state.t_lid);
+  setVal("input-r-hole", state.r_hole);
+  setVal("input-lid-edge", state.lid_edge_length);
+  setVal("input-lid-offset", state.lid_offset_from_hopper_edge);
+  setChecked("chk-advanced-lid-mat", state.advanced_lid_material);
+  setVal("input-rho-lid", state.rho_lid);
+  lidMaterialUi(state.advanced_lid_material);
+
+  // materials
+  const sel = byId("select-shell-material");
+  if (sel) sel.value = state.shell_material;
+  setVal("input-rho-shell", state.rho_shell);
+  setVal("input-rho-dust", state.rho_dust);
+  setVal("input-humidity", state.humidity);
+  setVal("input-fill-perc", state.fill_percentage);
+
+  // view
+  setChecked("chk-snap-grid", state.snap_to_grid);
+  setVal("input-move-step", state.move_step_mm);
+  setChecked("chk-ref-cube", state.show_reference_cube);
+  setChecked("chk-show-cog-empty", state.show_cog_empty);
+  setChecked("chk-show-cog-filled", state.show_cog_filled);
+
+  // export
+  setChecked("chk-export-lid-with-container", state.export_lid_with_container);
+}
+
+/* ------------------------------------------------------------------ */
+/* Geometry creation                                                  */
+/* ------------------------------------------------------------------ */
+
+function buildWedgeGeometry(L_rect_m, H_m, W_m, x_m) {
+  const hw = W_m / 2;
+  const verts = [
+    // y = -hw
+    0, -hw, 0,
+    -x_m, -hw, 0,
+    0, -hw, H_m,
+    // y = +hw
+    0, hw, 0,
+    -x_m, hw, 0,
+    0, hw, H_m,
+  ];
+  const idx = [
+    0, 1, 4, 0, 4, 3,
+    1, 2, 5, 1, 5, 4,
+    2, 0, 3, 2, 3, 5,
+    0, 1, 2,
+    3, 5, 4,
+  ];
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
+// simple ring on top of lid to visually indicate hole location
+function createLidRingMesh(L, W, tLid) {
+  const rHole = mmToM(state.r_hole);
+  const ringWidth = mmToM(state.lid_edge_length);
+  const outerR = rHole + ringWidth;
+  const innerR = rHole;
+
+  const segments = 48;
+  const shape = new THREE.Shape();
+  shape.absarc(0, 0, outerR, 0, Math.PI * 2, false);
+  const holePath = new THREE.Path();
+  holePath.absarc(0, 0, innerR, 0, Math.PI * 2, true);
+  shape.holes.push(holePath);
+
+  const extrudeSettings = {
+    depth: tLid,
+    bevelEnabled: false,
+  };
+  const geom = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+  geom.rotateX(Math.PI / 2); // stand on top of lid
+
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x6b7280,
+    metalness: 0.3,
+    roughness: 0.6,
+  });
+
+  const mesh = new THREE.Mesh(geom, mat);
+
+  // Position ring center along length with offset from hopper edge (x=0)
+  const offsetX = mmToM(state.lid_offset_from_hopper_edge);
+  const cx = Math.min(Math.max(offsetX, 0), L);
+  const cy = 0;
+  const cz = mmToM(state.H) + tLid; // exactly on top of lid
+  mesh.position.set(cx, cy, cz);
+
+  return mesh;
+}
+
 function createContainerGroup() {
   const group = new THREE.Group();
 
@@ -388,338 +500,82 @@ function createContainerGroup() {
   const x = mmToM(state.x_hopper);
   const Hf = mmToM(state.H_frame);
 
-  const shellColor = 0x2563eb;
-  const frameColor = 0x00a676;
-  const lidColor = 0x9ca3af;
-
   const shellMat = new THREE.MeshStandardMaterial({
-    color: shellColor,
-    metalness: 0.5,
+    color: 0x2563eb,
+    metalness: 0.4,
     roughness: 0.4,
   });
   const frameMat = new THREE.MeshStandardMaterial({
-    color: frameColor,
-    metalness: 0.6,
+    color: 0x00a676,
+    metalness: 0.5,
     roughness: 0.3,
   });
   const lidMat = new THREE.MeshStandardMaterial({
-    color: lidColor,
-    metalness: 0.3,
+    color: 0x9ca3af,
+    metalness: 0.2,
     roughness: 0.6,
   });
 
   // Rectangular body
-  const rectGeom = new THREE.BoxGeometry(L, H, W);
-  const rectMesh = new THREE.Mesh(rectGeom, shellMat);
-  rectMesh.position.set(L / 2, 0, H / 2);
-  group.add(rectMesh);
+  const rect = new THREE.Mesh(new THREE.BoxGeometry(L, H, W), shellMat);
+  rect.position.set(L / 2, 0, H / 2);
+  group.add(rect);
 
   // Hopper wedge
   if (state.x_hopper > 0) {
     const wedgeGeom = buildWedgeGeometry(L, H, W, x);
-    const wedgeMesh = new THREE.Mesh(wedgeGeom, shellMat);
-    group.add(wedgeMesh);
+    const wedge = new THREE.Mesh(wedgeGeom, shellMat);
+    group.add(wedge);
   }
 
   // Frame
-  if (state.include_frame && Hf > 0.001) {
-    const frameGeom = new THREE.BoxGeometry(L, Hf, W);
-    const frameMesh = new THREE.Mesh(frameGeom, frameMat);
-    frameMesh.position.set(L / 2, 0, Hf / 2);
-    group.add(frameMesh);
-    frameGroup = frameMesh;
-  } else {
-    frameGroup = null;
+  frameMesh = null;
+  if (state.include_frame && Hf > 0) {
+    const fm = new THREE.Mesh(new THREE.BoxGeometry(L, Hf, W), frameMat);
+    fm.position.set(L / 2, 0, Hf / 2);
+    group.add(fm);
+    frameMesh = fm;
   }
 
-  // Lid mesh created separately
+  // Lid
   lidMesh = null;
   if (state.include_lid) {
-    const lidThickness = mmToM(state.t_lid);
-    const lidGeom = new THREE.BoxGeometry(L, lidThickness, W);
-    const lid = new THREE.Mesh(lidGeom, lidMat);
-    // Place on top of container
-    lid.position.set(L / 2, 0, H + lidThickness / 2);
+    const tLid = mmToM(state.t_lid);
+    const lid = new THREE.Mesh(new THREE.BoxGeometry(L, tLid, W), lidMat);
+    lid.position.set(L / 2, 0, H + tLid / 2);
     group.add(lid);
     lidMesh = lid;
-  }
 
-  // Set group position so that base aligned with z=0 and origin is at 0,0
-  // We already have base at z=0; group is anchored at x from -x_hopper (if wedge) to L_rect
-  // For simplicity, keep group origin at (0,0,0) here and use for CoG calculations.
+    // ring to visualize hole location
+    const ring = createLidRingMesh(L, W, tLid);
+    group.add(ring);
+  }
 
   return group;
 }
 
-// Build wedge geometry as triangular prism
-function buildWedgeGeometry(L_rect_m, H_m, W_m, x_m) {
-  // wedge extends from x = -x_m to 0
-  const hw = W_m / 2;
-  // vertices
-  const vertices = [
-    // left side triangle (y = -hw)
-    0, -hw, 0, // P1
-    -x_m, -hw, 0, // P2
-    0, -hw, H_m, // P3
-    // right side triangle (y = +hw)
-    0, hw, 0, // P4
-    -x_m, hw, 0, // P5
-    0, hw, H_m, // P6
-  ];
+function rebuildGeometry() {
+  if (!scene) return;
+  const prevWasContainerSelected = selectedObject === containerGroup || !selectedObject;
 
-  const indices = [
-    // bottom quad (P1, P2, P5, P4)
-    0, 1, 4,
-    0, 4, 3,
-    // back quad (P2, P3, P6, P5)
-    1, 2, 5,
-    1, 5, 4,
-    // front quad (P3, P1, P4, P6)
-    2, 0, 3,
-    2, 3, 5,
-    // left triangle (P1, P2, P3)
-    0, 1, 2,
-    // right triangle (P4, P6, P5)
-    3, 5, 4,
-  ];
-
-  const geom = new THREE.BufferGeometry();
-  geom.setAttribute(
-    "position",
-    new THREE.Float32BufferAttribute(vertices, 3)
-  );
-  geom.setIndex(indices);
-  geom.computeVertexNormals();
-
-  // Shift wedge so that its right vertical edge sits at x=0; we already did that.
-  return geom;
-}
-
-// Scene setup
-function initThree() {
-  const container = document.getElementById("renderer-container");
-  const w = container.clientWidth || 800;
-  const h = container.clientHeight || 600;
-
-  renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setSize(w, h);
-  renderer.setPixelRatio(window.devicePixelRatio || 1);
-  container.appendChild(renderer.domElement);
-
-  scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xf3f4f6);
-
-  // Camera
-  const aspect = w / h;
-  const camSize = 3;
-  camera = new THREE.OrthographicCamera(
-    -camSize * aspect,
-    camSize * aspect,
-    camSize,
-    -camSize,
-    0.1,
-    100
-  );
-  resetCameraToIsometric();
-
-  controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.1;
-  controls.enablePan = true;
-  // Pitch can go below floor (Q33), so no limit.
-
-  // Lights
-  const ambient = new THREE.AmbientLight(0xffffff, 0.6);
-  scene.add(ambient);
-  const dir = new THREE.DirectionalLight(0xffffff, 0.9);
-  dir.position.set(3, 4, 5);
-  scene.add(dir);
-
-  // Ground grid / slab
-  const groundSize = 10;
-  const slabGeom = new THREE.BoxGeometry(groundSize, 0.1, groundSize);
-  const slabMat = new THREE.MeshStandardMaterial({
-    color: 0xe5e7eb,
-    roughness: 0.9,
-    metalness: 0,
-  });
-  const slab = new THREE.Mesh(slabGeom, slabMat);
-  slab.position.set(groundSize / 2 - 0.5, 0, -0.05);
-  slab.receiveShadow = true;
-  scene.add(slab);
-
-  const grid = new THREE.GridHelper(groundSize, 20, 0xcbd5f5, 0xe5e7eb);
-  grid.position.set(groundSize / 2 - 0.5, 0, 0.001);
-  scene.add(grid);
-
-  // Reference cube (1m)
-  const cubeGeom = new THREE.BoxGeometry(1, 1, 1);
-  const cubeMat = new THREE.MeshStandardMaterial({
-    color: 0x7c3aed,
-    transparent: true,
-    opacity: 0.5,
-  });
-  referenceCube = new THREE.Mesh(cubeGeom, cubeMat);
-  referenceCube.position.set(-1, -1, 0.5);
-  referenceCube.visible = state.show_reference_cube;
-  scene.add(referenceCube);
-
-  // Container group
+  if (containerGroup) scene.remove(containerGroup);
   containerGroup = createContainerGroup();
   scene.add(containerGroup);
 
-  // CoG markers
-  cogEmptyArrow = buildArrowHelper(0x0ea5e9);
-  cogFilledArrow = buildArrowHelper(0xf97316);
-  scene.add(cogEmptyArrow);
-  scene.add(cogFilledArrow);
+  if (prevWasContainerSelected) selectedObject = containerGroup;
 
-  // Raycaster for selection
-  setupSelection();
+  if (referenceCube) referenceCube.visible = state.show_reference_cube;
 
-  window.addEventListener("resize", onWindowResize);
-  animate();
-}
-
-function resetCameraToIsometric() {
-  const distance = 8;
-  const angle = (Math.PI / 180) * 35;
-  const azimuth = (Math.PI / 180) * 45;
-  const x = distance * Math.cos(angle) * Math.cos(azimuth);
-  const y = distance * Math.cos(angle) * Math.sin(azimuth);
-  const z = distance * Math.sin(angle);
-  camera.position.set(x, y, z);
-  camera.lookAt(2, 0, 1);
-}
-
-function buildArrowHelper(color) {
-  const dir = new THREE.Vector3(0, 0, -1);
-  const origin = new THREE.Vector3(0, 0, 0);
-  const length = 0.8;
-  const headLength = 0.2;
-  const headWidth = 0.15;
-  const arrow = new THREE.ArrowHelper(dir, origin, length, color);
-  return arrow;
-}
-
-function onWindowResize() {
-  if (!renderer || !camera) return;
-  const container = document.getElementById("renderer-container");
-  const w = container.clientWidth || 800;
-  const h = container.clientHeight || 600;
-  renderer.setSize(w, h);
-  const aspect = w / h;
-  const camSize = 3;
-  camera.left = -camSize * aspect;
-  camera.right = camSize * aspect;
-  camera.top = camSize;
-  camera.bottom = -camSize;
-  camera.updateProjectionMatrix();
-}
-
-// Selection handling
-let raycaster, mouse;
-function setupSelection() {
-  raycaster = new THREE.Raycaster();
-  mouse = new THREE.Vector2();
-
-  renderer.domElement.addEventListener("pointerdown", (event) => {
-    const rect = renderer.domElement.getBoundingClientRect();
-    mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-    mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-    raycaster.setFromCamera(mouse, camera);
-    const objects = [];
-    if (containerGroup) objects.push(containerGroup);
-    importedObjects.forEach((o) => objects.push(o.mesh));
-    if (lidMesh && !containerGroup.children.includes(lidMesh)) objects.push(lidMesh);
-    const intersects = raycaster.intersectObjects(objects, true);
-    if (intersects.length > 0) {
-      const obj = findRootObject(intersects[0].object);
-      selectObject(obj);
-    }
-  });
-}
-function findRootObject(obj) {
-  // We treat containerGroup as single object, imported meshes by top-level.
-  if (!obj || !obj.parent) return obj;
-  let current = obj;
-  while (current.parent && current.parent !== scene) {
-    if (current === containerGroup) return containerGroup;
-    current = current.parent;
-  }
-  return current;
-}
-function selectObject(obj) {
-  selectedObject = obj;
-  log(`Selected object: ${obj === containerGroup ? "Container" : (obj.userData.name || "Imported")}`);
-}
-
-// Movement (WASD)
-function setupKeyboard() {
-  window.addEventListener("keydown", (e) => {
-    const key = e.key.toLowerCase();
-    if (!selectedObject) return;
-    let dx = 0;
-    let dy = 0;
-    if (key === "w") dy += 1;
-    else if (key === "s") dy -= 1;
-    else if (key === "a") dx -= 1;
-    else if (key === "d") dx += 1;
-    else return;
-
-    e.preventDefault();
-
-    const step = mmToM(state.move_step_mm);
-    const pos = selectedObject.position.clone();
-    pos.x += dx * step;
-    pos.y += dy * step;
-
-    if (state.snap_to_grid) {
-      const gs = mmToM(100); // 100 mm grid
-      pos.x = Math.round(pos.x / gs) * gs;
-      pos.y = Math.round(pos.y / gs) * gs;
-    }
-
-    selectedObject.position.copy(pos);
-    log(`Moved selected object with ${key.toUpperCase()}.`);
-    // Collision recalculation happens naturally in animate/render.
-  });
-}
-
-// Scene update
-function rebuildSceneGeometry() {
-  if (containerGroup) {
-    scene.remove(containerGroup);
-  }
-  containerGroup = createContainerGroup();
-  scene.add(containerGroup);
-  referenceCube.visible = state.show_reference_cube;
   updateCogMarkers();
+  refreshObjectList();
+  updateSelectionUi();
 }
 
-// CoG + outputs
-function updateOutputs() {
-  const results = computeVolumesAndMasses();
-
-  document.getElementById("out-v-int").textContent = formatNumber(results.V_internal, 3);
-  document.getElementById("out-v-fill").textContent = formatNumber(results.V_fill, 3);
-  document.getElementById("out-m-shell").textContent = formatNumber(results.m_shell, 1);
-  document.getElementById("out-m-lid").textContent = formatNumber(results.m_lid, 1);
-  document.getElementById("out-m-dust").textContent = formatNumber(results.m_dust, 1);
-  document.getElementById("out-m-total").textContent = formatNumber(results.m_total, 1);
-
-  const cEmpty = results.cog_empty;
-  const cFilled = results.cog_filled;
-  document.getElementById("out-cog-empty").textContent =
-    cEmpty ? `(${formatNumber(cEmpty.x, 3)}, ${formatNumber(cEmpty.y, 3)}, ${formatNumber(cEmpty.z, 3)})` : "–";
-  document.getElementById("out-cog-filled").textContent =
-    cFilled ? `(${formatNumber(cFilled.x, 3)}, ${formatNumber(cFilled.y, 3)}, ${formatNumber(cFilled.z, 3)})` : "–";
-
-  updateCogMarkers(results);
-}
+/* ------------------------------------------------------------------ */
+/* Calculations for volume, mass & CoG                                */
+/* ------------------------------------------------------------------ */
 
 function computeVolumesAndMasses() {
-  // Outer volumes
   const L = mmToM(state.L_rect);
   const H = mmToM(state.H);
   const W = mmToM(state.W);
@@ -727,28 +583,24 @@ function computeVolumesAndMasses() {
   const Hf = mmToM(state.H_frame);
   const t = mmToM(state.t_wall);
 
-  // Rectangular internal
-  const L_inner = Math.max(0.001, L - 2 * t);
-  const W_inner = Math.max(0.001, W - 2 * t);
-  const H_inner = Math.max(0.001, H - t); // simple: open top, only bottom thickness
+  const L_in = Math.max(0.001, L - 2 * t);
+  const W_in = Math.max(0.001, W - 2 * t);
+  const H_in = Math.max(0.001, H - t); // open top
 
-  // Hopper internal (approx)
-  const x_inner = Math.max(0, x - t);
-  const H_inner_tri = H_inner;
+  const x_in = Math.max(0, x - t);
+  const H_tri_in = H_in;
 
-  const V_rect_inner = L_inner * W_inner * H_inner;
-  const V_hopper_inner = 0.5 * x_inner * H_inner_tri * W_inner;
-  const V_internal = V_rect_inner + V_hopper_inner;
+  const V_rect_in = L_in * W_in * H_in;
+  const V_hopper_in = 0.5 * x_in * H_tri_in * W_in;
+  const V_internal = V_rect_in + V_hopper_in;
 
-  const fillFraction = Math.min(1, Math.max(0, state.fill_percentage / 100));
-  const V_fill = V_internal * fillFraction;
+  const fillFrac = Math.min(1, Math.max(0, state.fill_percentage / 100));
+  const V_fill = V_internal * fillFrac;
 
-  // Outer volumes (solid)
-  const V_rect_outer = L * W * H;
-  const V_hopper_outer = x > 0 ? 0.5 * x * H * W : 0;
-  const V_frame_outer = state.include_frame ? L * W * Hf : 0;
+  const V_rect_out = L * W * H;
+  const V_hopper_out = x > 0 ? 0.5 * x * H * W : 0;
+  const V_frame_out = state.include_frame ? L * W * Hf : 0;
 
-  // Approx pockets volume
   const Wp = mmToM(state.W_pocket);
   const Hp = mmToM(state.H_pocket);
   const Sp = mmToM(state.S_pocket);
@@ -757,27 +609,25 @@ function computeVolumesAndMasses() {
   if (state.include_frame) {
     const availableWidth = W - 2 * minMargin;
     if (2 * Wp + Sp <= availableWidth + 1e-6) {
-      // pockets full-height through frame
       const V_one = L * Wp * Hp;
       V_pockets = 2 * V_one;
     }
   }
 
-  const V_outer = V_rect_outer + V_hopper_outer + V_frame_outer;
+  const V_outer = V_rect_out + V_hopper_out + V_frame_out;
   const V_shell = Math.max(0, V_outer - V_internal - V_pockets);
 
   const rhoShell = state.rho_shell;
   const rhoDust = state.rho_dust;
   const rhoLid = state.advanced_lid_material ? state.rho_lid : rhoShell;
 
-  // Lid volume
   let V_lid = 0;
   if (state.include_lid) {
-    const lidThickness = mmToM(state.t_lid);
+    const tLid = mmToM(state.t_lid);
     const areaLid = L * W;
     const rHole = mmToM(state.r_hole);
     const areaHole = Math.PI * rHole * rHole;
-    V_lid = Math.max(0, (areaLid - areaHole) * lidThickness);
+    V_lid = Math.max(0, (areaLid - areaHole) * tLid);
   }
 
   const m_shell = V_shell * rhoShell;
@@ -786,83 +636,49 @@ function computeVolumesAndMasses() {
   const m_empty = m_shell + m_lid;
   const m_total = m_empty + m_dust;
 
-  // CoG (outer-only centroids)
-  const c_rect = {
-    x: L / 2,
-    y: 0,
-    z: H / 2,
-  };
-  const c_hopper =
-    x > 0
-      ? {
-          x: -x / 3,
-          y: 0,
-          z: H / 3,
-        }
-      : null;
-  const c_frame = state.include_frame
-    ? {
-        x: L / 2,
-        y: 0,
-        z: Hf / 2,
-      }
-    : null;
+  const c_rect = { x: L / 2, y: 0, z: H / 2 };
+  const c_hopper = x > 0 ? { x: -x / 3, y: 0, z: H / 3 } : null;
+  const c_frame = state.include_frame ? { x: L / 2, y: 0, z: Hf / 2 } : null;
   const c_lid =
     state.include_lid && V_lid > 0
-      ? {
-          x: L / 2,
-          y: 0,
-          z: H + mmToM(state.t_lid) / 2,
-        }
+      ? { x: L / 2, y: 0, z: H + mmToM(state.t_lid) / 2 }
       : null;
 
-  // Outer volumes for centroid weighting (shell)
-  const components_empty = [];
-  if (V_rect_outer > 0) components_empty.push({ v: V_rect_outer, c: c_rect });
-  if (V_hopper_outer > 0) components_empty.push({ v: V_hopper_outer, c: c_hopper });
-  if (V_frame_outer > 0) components_empty.push({ v: V_frame_outer, c: c_frame });
-  if (state.include_lid && V_lid > 0) {
-    components_empty.push({ v: V_lid, c: c_lid });
-  }
-
   function weightedCentroid(components) {
-    let vx = 0,
-      vy = 0,
-      vz = 0,
-      vt = 0;
-    components.forEach((comp) => {
-      if (!comp || !comp.c) return;
-      vx += comp.v * comp.c.x;
-      vy += comp.v * comp.c.y;
-      vz += comp.v * comp.c.z;
-      vt += comp.v;
+    let vx = 0, vy = 0, vz = 0, vt = 0;
+    components.forEach((c) => {
+      if (!c || !c.c) return;
+      vx += c.v * c.c.x;
+      vy += c.v * c.c.y;
+      vz += c.v * c.c.z;
+      vt += c.v;
     });
     if (vt <= 0) return null;
     return { x: vx / vt, y: vy / vt, z: vz / vt };
   }
 
-  const cog_empty = weightedCentroid(components_empty);
+  const compsEmpty = [];
+  if (V_rect_out > 0) compsEmpty.push({ v: V_rect_out, c: c_rect });
+  if (V_hopper_out > 0) compsEmpty.push({ v: V_hopper_out, c: c_hopper });
+  if (V_frame_out > 0) compsEmpty.push({ v: V_frame_out, c: c_frame });
+  if (state.include_lid && V_lid > 0) compsEmpty.push({ v: V_lid, c: c_lid });
 
-  // Dust centroid: simple approximation
+  const cog_empty = weightedCentroid(compsEmpty);
+
   let cog_dust = null;
-  if (m_dust > 0 && V_internal > 0) {
-    const z_int = H_inner / 2; // approximate centroid of internal cavity in z
-    const z_dust = z_int * fillFraction; // simple linear model
-    cog_dust = {
-      x: L / 2, // approximate
-      y: 0,
-      z: z_dust,
-    };
+  if (V_fill > 0 && V_internal > 0) {
+    const z_int = H_in / 2;
+    const z_dust = z_int * fillFrac;
+    cog_dust = { x: L / 2, y: 0, z: z_dust };
   }
 
   let cog_filled = null;
   if (cog_empty && cog_dust && m_dust > 0 && m_empty > 0) {
-    const M1 = m_empty;
-    const M2 = m_dust;
-    const x = (M1 * cog_empty.x + M2 * cog_dust.x) / (M1 + M2);
-    const y = (M1 * cog_empty.y + M2 * cog_dust.y) / (M1 + M2);
-    const z = (M1 * cog_empty.z + M2 * cog_dust.z) / (M1 + M2);
-    cog_filled = { x, y, z };
+    const M1 = m_empty, M2 = m_dust;
+    const xC = (M1 * cog_empty.x + M2 * cog_dust.x) / (M1 + M2);
+    const yC = (M1 * cog_empty.y + M2 * cog_dust.y) / (M1 + M2);
+    const zC = (M1 * cog_empty.z + M2 * cog_dust.z) / (M1 + M2);
+    cog_filled = { x: xC, y: yC, z: zC };
   } else if (cog_empty) {
     cog_filled = cog_empty;
   }
@@ -879,80 +695,382 @@ function computeVolumesAndMasses() {
   };
 }
 
+function updateOutputs() {
+  const r = computeVolumesAndMasses();
+  byId("out-v-int").textContent = fmt(r.V_internal, 3);
+  byId("out-v-fill").textContent = fmt(r.V_fill, 3);
+  byId("out-m-shell").textContent = fmt(r.m_shell, 1);
+  byId("out-m-lid").textContent = fmt(r.m_lid, 1);
+  byId("out-m-dust").textContent = fmt(r.m_dust, 1);
+  byId("out-m-total").textContent = fmt(r.m_total, 1);
+
+  if (r.cog_empty) {
+    byId("out-cog-empty").textContent =
+      `(${fmt(r.cog_empty.x, 3)}, ${fmt(r.cog_empty.y, 3)}, ${fmt(r.cog_empty.z, 3)})`;
+  } else {
+    byId("out-cog-empty").textContent = "–";
+  }
+  if (r.cog_filled) {
+    byId("out-cog-filled").textContent =
+      `(${fmt(r.cog_filled.x, 3)}, ${fmt(r.cog_filled.y, 3)}, ${fmt(r.cog_filled.z, 3)})`;
+  } else {
+    byId("out-cog-filled").textContent = "–";
+  }
+
+  updateCogMarkers(r);
+}
+
 function updateCogMarkers(results) {
   if (!results) results = computeVolumesAndMasses();
   const { cog_empty, cog_filled } = results;
 
-  const showEmpty = state.show_cog_empty && cog_empty;
-  const showFilled = state.show_cog_filled && cog_filled;
-
-  cogEmptyArrow.visible = !!showEmpty;
-  cogFilledArrow.visible = !!showFilled;
-
-  if (showEmpty) {
-    const origin = new THREE.Vector3(cog_empty.x, cog_empty.y, cog_empty.z);
-    const dir = new THREE.Vector3(0, 0, -1);
-    const length = 0.8;
-    cogEmptyArrow.position.copy(origin);
-    cogEmptyArrow.setDirection(dir);
-    cogEmptyArrow.setLength(length, 0.2, 0.12);
+  if (cogEmptyArrow) {
+    cogEmptyArrow.visible = !!(state.show_cog_empty && cog_empty);
+    if (cog_empty) {
+      cogEmptyArrow.position.set(cog_empty.x, cog_empty.y, cog_empty.z);
+    }
   }
 
-  if (showFilled) {
-    const origin = new THREE.Vector3(cog_filled.x, cog_filled.y, cog_filled.z);
-    const dir = new THREE.Vector3(0, 0, -1);
-    const length = 0.8;
-    cogFilledArrow.position.copy(origin);
-    cogFilledArrow.setDirection(dir);
-    cogFilledArrow.setLength(length, 0.2, 0.12);
+  if (cogFilledArrow) {
+    cogFilledArrow.visible = !!(state.show_cog_filled && cog_filled);
+    if (cog_filled) {
+      cogFilledArrow.position.set(cog_filled.x, cog_filled.y, cog_filled.z);
+    }
   }
 }
 
-// Collision detection (AABB)
+/* ------------------------------------------------------------------ */
+/* Collision (container vs imported STLs)                             */
+/* ------------------------------------------------------------------ */
+
 function updateCollisions() {
-  // For simplicity, check containerGroup vs importedObjects
   if (!containerGroup) return;
-  const containerBox = new THREE.Box3().setFromObject(containerGroup);
-  importedObjects.forEach((obj) => {
-    const box = new THREE.Box3().setFromObject(obj.mesh);
-    if (containerBox.intersectsBox(box)) {
-      const intersection = containerBox.clone().intersect(box);
+
+  const boxContainer = new THREE.Box3().setFromObject(containerGroup);
+  let firstIntersection = null;
+
+  importedObjects.forEach((o) => {
+    const box = new THREE.Box3().setFromObject(o.mesh);
+    if (boxContainer.intersectsBox(box)) {
+      const inter = boxContainer.clone().intersect(box);
       const size = new THREE.Vector3();
-      intersection.getSize(size);
-      const dx = size.x;
-      const dy = size.y;
-      const dz = size.z;
-      const V_int_m3 = dx * dy * dz;
-      const V_int_l = V_int_m3 * 1000;
-      if (V_int_m3 > 0) {
-        log(
-          `Collision: overlap approx ${formatNumber(dx * 1000, 1)} x ${formatNumber(
-            dy * 1000,
-            1
-          )} x ${formatNumber(dz * 1000, 1)} mm, ~${formatNumber(V_int_l, 2)} L`
-        );
+      inter.getSize(size);
+      if (size.x > 0 && size.y > 0 && size.z > 0 && !firstIntersection) {
+        firstIntersection = inter;
       }
     }
   });
+
+  if (firstIntersection) {
+    const size = new THREE.Vector3();
+    firstIntersection.getSize(size);
+    const center = new THREE.Vector3();
+    firstIntersection.getCenter(center);
+    const volume = size.x * size.y * size.z;
+
+    if (!collisionMarker) {
+      const geo = new THREE.BoxGeometry(1, 1, 1);
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0xff4b4b,
+        transparent: true,
+        opacity: 0.35,
+      });
+      collisionMarker = new THREE.Mesh(geo, mat);
+      scene.add(collisionMarker);
+    }
+    collisionMarker.visible = true;
+    collisionMarker.position.copy(center);
+    collisionMarker.scale.set(size.x, size.y, size.z);
+
+    const eps = 1e-6;
+    if (Math.abs(volume - lastCollisionVolume) > eps) {
+      const dxmm = size.x * 1000;
+      const dymm = size.y * 1000;
+      const dzmm = size.z * 1000;
+      const vLit = volume * 1000;
+      log(
+        `Collision: ~${fmt(dxmm, 1)}×${fmt(dymm, 1)}×${fmt(
+          dzmm,
+          1
+        )} mm, ≈${fmt(vLit, 2)} L overlap`
+      );
+      lastCollisionVolume = volume;
+    }
+  } else {
+    if (collisionMarker) collisionMarker.visible = false;
+    if (lastCollisionVolume > 0) {
+      log("Collision cleared.");
+      lastCollisionVolume = 0;
+    }
+  }
 }
 
-// STL import/export
+/* ------------------------------------------------------------------ */
+/* Three.js init, selection & movement                                */
+/* ------------------------------------------------------------------ */
+
+function resetCamera() {
+  const d = 8;
+  const elev = (35 * Math.PI) / 180;
+  const az = (45 * Math.PI) / 180;
+  const x = d * Math.cos(elev) * Math.cos(az);
+  const y = d * Math.cos(elev) * Math.sin(az);
+  const z = d * Math.sin(elev);
+  camera.position.set(x, y, z);
+  camera.lookAt(2, 0, 1);
+}
+
+function initThree() {
+  const container = byId("renderer-container");
+  const width = container.clientWidth || 800;
+  const height = container.clientHeight || 600;
+
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(width, height);
+  renderer.setPixelRatio(window.devicePixelRatio || 1);
+  container.appendChild(renderer.domElement);
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xf3f4f6);
+
+  const aspect = width / height;
+  const camSize = 3;
+  camera = new THREE.OrthographicCamera(
+    -camSize * aspect,
+    camSize * aspect,
+    camSize,
+    -camSize,
+    0.1,
+    100
+  );
+  resetCamera();
+
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.1;
+
+  const amb = new THREE.AmbientLight(0xffffff, 0.6);
+  scene.add(amb);
+  const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+  dir.position.set(3, 4, 5);
+  scene.add(dir);
+
+  const groundSize = 10;
+  const slabGeom = new THREE.BoxGeometry(groundSize, 0.1, groundSize);
+  const slabMat = new THREE.MeshStandardMaterial({
+    color: 0xe5e7eb,
+    roughness: 0.9,
+  });
+  const slab = new THREE.Mesh(slabGeom, slabMat);
+  slab.position.set(groundSize / 2 - 0.5, 0, -0.05);
+  scene.add(slab);
+
+  const grid = new THREE.GridHelper(groundSize, 20, 0xcbd5f5, 0xe5e7eb);
+  grid.position.set(groundSize / 2 - 0.5, 0, 0.001);
+  scene.add(grid);
+
+  const cubeGeom = new THREE.BoxGeometry(1, 1, 1);
+  const cubeMat = new THREE.MeshStandardMaterial({
+    color: 0x7c3aed,
+    transparent: true,
+    opacity: 0.5,
+  });
+  referenceCube = new THREE.Mesh(cubeGeom, cubeMat);
+  referenceCube.position.set(-1, -1, 0.5);
+  referenceCube.visible = state.show_reference_cube;
+  scene.add(referenceCube);
+
+  containerGroup = createContainerGroup();
+  scene.add(containerGroup);
+
+  cogEmptyArrow = new THREE.ArrowHelper(
+    new THREE.Vector3(0, 0, -1),
+    new THREE.Vector3(0, 0, 0),
+    0.8,
+    0x0ea5e9
+  );
+  cogFilledArrow = new THREE.ArrowHelper(
+    new THREE.Vector3(0, 0, -1),
+    new THREE.Vector3(0, 0, 0),
+    0.8,
+    0xf97316
+  );
+  scene.add(cogEmptyArrow);
+  scene.add(cogFilledArrow);
+  updateCogMarkers();
+
+  raycaster = new THREE.Raycaster();
+  mouse = new THREE.Vector2();
+  renderer.domElement.addEventListener("pointerdown", onPointerDown);
+
+  window.addEventListener("resize", onResize);
+  window.addEventListener("keydown", onKeyDown);
+
+  selectedObject = containerGroup;
+  refreshObjectList();
+  updateSelectionUi();
+
+  animate();
+}
+
+function onResize() {
+  if (!renderer || !camera) return;
+  const container = byId("renderer-container");
+  const w = container.clientWidth || 800;
+  const h = container.clientHeight || 600;
+  renderer.setSize(w, h);
+  const aspect = w / h;
+  const camSize = 3;
+  camera.left = -camSize * aspect;
+  camera.right = camSize * aspect;
+  camera.top = camSize;
+  camera.bottom = -camSize;
+  camera.updateProjectionMatrix();
+}
+
+function findRoot(obj) {
+  let cur = obj;
+  while (cur.parent && cur.parent !== scene) {
+    if (cur === containerGroup) return containerGroup;
+    cur = cur.parent;
+  }
+  return cur;
+}
+
+function onPointerDown(ev) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  mouse.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+  mouse.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+  const objs = [];
+  if (containerGroup) objs.push(containerGroup);
+  importedObjects.forEach((o) => objs.push(o.mesh));
+  const hits = raycaster.intersectObjects(objs, true);
+  if (hits.length > 0) {
+    const root = findRoot(hits[0].object);
+    selectedObject = root;
+    updateSelectionUi();
+    refreshObjectList();
+    log(`Selected: ${root === containerGroup ? "Container" : root.userData.name || "Imported object"}`);
+  }
+}
+
+function onKeyDown(e) {
+  if (!selectedObject) return;
+  const key = e.key.toLowerCase();
+  if (!["w", "a", "s", "d"].includes(key)) return;
+  e.preventDefault();
+
+  const step = mmToM(state.move_step_mm);
+  const pos = selectedObject.position.clone();
+  if (key === "w") pos.y += step;
+  if (key === "s") pos.y -= step;
+  if (key === "a") pos.x -= step;
+  if (key === "d") pos.x += step;
+
+  if (state.snap_to_grid) {
+    const gs = mmToM(100);
+    pos.x = Math.round(pos.x / gs) * gs;
+    pos.y = Math.round(pos.y / gs) * gs;
+  }
+  selectedObject.position.copy(pos);
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  if (controls) controls.update();
+  if (renderer && scene && camera) renderer.render(scene, camera);
+  updateCollisions();
+}
+
+/* ------------------------------------------------------------------ */
+/* Layers / selection UI                                              */
+/* ------------------------------------------------------------------ */
+
+function setBaseFace(mesh, mode) {
+  const box = new THREE.Box3().setFromObject(mesh);
+  const center = new THREE.Vector3();
+  const size = new THREE.Vector3();
+  box.getCenter(center);
+  box.getSize(size);
+  const minZ = box.min.z;
+  const maxZ = box.max.z;
+  let baseZ;
+  if (mode === "bottom") baseZ = minZ;
+  else if (mode === "top") baseZ = maxZ;
+  else baseZ = center.z;
+  const delta = -baseZ;
+  mesh.position.z += delta;
+  mesh.userData.baseFace = mode;
+}
+
+function refreshObjectList() {
+  const list = objectListEl || byId("object-list");
+  if (!list) return;
+  list.innerHTML = "";
+
+  const makeEntry = (label, obj) => {
+    const div = document.createElement("div");
+    div.textContent = label;
+    div.style.cursor = "pointer";
+    div.style.padding = "2px 4px";
+    div.style.fontSize = "11px";
+    if (selectedObject === obj) {
+      div.style.background = "#e5edff";
+    }
+    div.addEventListener("click", () => {
+      selectedObject = obj;
+      updateSelectionUi();
+      refreshObjectList();
+      log(`Selected: ${label} (via list)`);
+    });
+    list.appendChild(div);
+  };
+
+  if (containerGroup) {
+    makeEntry("Container", containerGroup);
+  }
+  importedObjects.forEach((o, idx) => {
+    makeEntry(o.name || `Imported ${idx + 1}`, o.mesh);
+  });
+}
+
+function updateSelectionUi() {
+  if (!selectedObject) selectedObject = containerGroup;
+  const nameEl = selectedNameEl || byId("selected-object-name");
+  const baseSel = baseFaceSelectEl || byId("select-base-face");
+  if (!nameEl || !baseSel) return;
+
+  if (selectedObject === containerGroup || !selectedObject) {
+    nameEl.textContent = "Container";
+    baseSel.disabled = true;
+  } else {
+    const obj = importedObjects.find((o) => o.mesh === selectedObject);
+    nameEl.textContent = obj ? obj.name || "Imported object" : "Object";
+    baseSel.disabled = !obj;
+    if (obj) {
+      baseSel.value = obj.mesh.userData.baseFace || "bottom";
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* STL import/export                                                  */
+/* ------------------------------------------------------------------ */
+
 function importSTL(file) {
   if (!file) return;
   const maxSize = 15 * 1024 * 1024;
   if (file.size > maxSize) {
-    const proceed = window.confirm(
-      "File is large and may slow your browser (" +
-        (file.size / (1024 * 1024)).toFixed(1) +
-        " MB). Continue?"
+    const ok = confirm(
+      `File is ${(file.size / 1024 / 1024).toFixed(1)} MB – may slow the browser. Continue?`
     );
-    if (!proceed) return;
+    if (!ok) return;
   }
 
   const reader = new FileReader();
-  reader.onload = function (e) {
-    const buffer = e.target.result;
-    const geom = loader.parse(buffer);
+  reader.onload = (e) => {
+    const geom = loader.parse(e.target.result);
     const mat = new THREE.MeshStandardMaterial({
       color: 0x6b7280,
       metalness: 0.1,
@@ -960,461 +1078,426 @@ function importSTL(file) {
     });
     const mesh = new THREE.Mesh(geom, mat);
     mesh.geometry.computeBoundingBox();
-    const box = mesh.geometry.boundingBox;
+    const box = new THREE.Box3().setFromObject(mesh);
     const size = new THREE.Vector3();
-    box.getSize(size);
     const center = new THREE.Vector3();
+    box.getSize(size);
     box.getCenter(center);
     mesh.position.sub(center);
-    mesh.position.z += size.z / 2 + 0.01;
+    mesh.position.z += size.z / 2 + 0.01; // stand on ground
+    mesh.userData.baseFace = "bottom";
     mesh.userData.name = file.name;
+
     scene.add(mesh);
     importedObjects.push({ mesh, name: file.name });
+    refreshObjectList();
     log(`Imported STL: ${file.name}`);
   };
   reader.readAsArrayBuffer(file);
 }
 
-function exportContainer(includeLidInExport) {
+function exportContainer(includeLid) {
   if (!containerGroup) return;
-  // Clone containerGroup to new group and normalize base center to origin
-  const exportGroup = new THREE.Group();
+  const grp = new THREE.Group();
   containerGroup.traverse((obj) => {
-    if (obj.isMesh) {
-      const clone = obj.clone();
-      clone.material = clone.material.clone();
-      exportGroup.add(clone);
-    }
+    if (obj.isMesh) grp.add(obj.clone());
   });
-  if (includeLidInExport && lidMesh && !containerGroup.children.includes(lidMesh)) {
-    const cloneLid = lidMesh.clone();
-    exportGroup.add(cloneLid);
+  if (includeLid && lidMesh && !containerGroup.children.includes(lidMesh)) {
+    grp.add(lidMesh.clone());
   }
 
-  const box = new THREE.Box3().setFromObject(exportGroup);
-  const size = new THREE.Vector3();
+  const box = new THREE.Box3().setFromObject(grp);
   const center = new THREE.Vector3();
-  box.getSize(size);
+  const size = new THREE.Vector3();
   box.getCenter(center);
-
-  // Translate so base at z=0 and center at (0,0)
+  box.getSize(size);
   const offset = new THREE.Vector3(-center.x, -center.y, -box.min.z);
-  exportGroup.position.add(offset);
+  grp.position.add(offset);
 
-  const result = exporter.parse(exportGroup, { binary: true });
-  const blob = new Blob([result], { type: "application/octet-stream" });
+  const data = exporter.parse(grp, { binary: true });
+  const blob = new Blob([data], { type: "application/octet-stream" });
   const url = URL.createObjectURL(blob);
-
-  const link = document.createElement("a");
-  const L = state.L_rect;
-  const H = state.H;
-  const W = state.W;
-  link.href = url;
-  link.download = `container_${L}x${W}x${H}.stl`;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `container_${state.L_rect}x${state.W}x${state.H}.stl`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
   URL.revokeObjectURL(url);
   log("Exported container STL.");
 }
 
 function exportLid() {
-  if (!state.include_lid || !lidMesh) {
-    log("Lid not included; nothing to export.");
+  if (!lidMesh || !state.include_lid) {
+    log("Lid not included – nothing to export.");
     return;
   }
+  const grp = new THREE.Group();
+  grp.add(lidMesh.clone());
 
-  const exportGroup = new THREE.Group();
-  const clone = lidMesh.clone();
-  exportGroup.add(clone);
-
-  const box = new THREE.Box3().setFromObject(exportGroup);
-  const size = new THREE.Vector3();
+  const box = new THREE.Box3().setFromObject(grp);
   const center = new THREE.Vector3();
-  box.getSize(size);
+  const size = new THREE.Vector3();
   box.getCenter(center);
+  box.getSize(size);
   const offset = new THREE.Vector3(-center.x, -center.y, -box.min.z);
-  exportGroup.position.add(offset);
+  grp.position.add(offset);
 
-  const result = exporter.parse(exportGroup, { binary: true });
-  const blob = new Blob([result], { type: "application/octet-stream" });
+  const data = exporter.parse(grp, { binary: true });
+  const blob = new Blob([data], { type: "application/octet-stream" });
   const url = URL.createObjectURL(blob);
-
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `lid_${state.L_rect}x${state.W}.stl`;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `lid_${state.L_rect}x${state.W}.stl`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
   URL.revokeObjectURL(url);
   log("Exported lid STL.");
 }
 
-// Shell material / density link
-function updateShellDensityByMaterial(updateState = true) {
-  const sel = document.getElementById("select-shell-material");
-  const densityInput = document.getElementById("input-rho-shell");
-  if (!sel || !densityInput) return;
+/* ------------------------------------------------------------------ */
+/* Config & source IO                                                 */
+/* ------------------------------------------------------------------ */
 
-  let rho = state.rho_shell;
-  if (sel.value === "steel") rho = 7850;
-  else if (sel.value === "stainless") rho = 8000;
-  else if (sel.value === "aluminum") rho = 2700;
-  if (sel.value !== "custom") {
-    densityInput.value = rho;
-    densityInput.disabled = true;
-  } else {
-    densityInput.disabled = false;
-  }
-
-  if (updateState) {
-    state.shell_material = sel.value;
-    state.rho_shell = parseFloat(densityInput.value) || rho;
-    commitState(state, "Changed shell material.");
-  }
-}
-
-// Config export/import
 function exportConfig() {
   const json = JSON.stringify(state, null, 2);
   navigator.clipboard
     .writeText(json)
-    .then(() => {
-      log("Config JSON copied to clipboard.");
-    })
+    .then(() => log("Config JSON copied to clipboard."))
     .catch(() => {
-      log("Failed to copy config to clipboard.");
-      alert("Config JSON:\n\n" + json);
+      alert("Could not copy automatically. JSON:\n\n" + json);
     });
 }
+
 function importConfig() {
-  const text = window.prompt("Paste JSON config here:");
+  const text = prompt("Paste JSON config here:");
   if (!text) return;
   try {
     const parsed = JSON.parse(text);
-    const merged = Object.assign(structuredClone(DEFAULTS), parsed);
+    const merged = Object.assign(deepClone(DEFAULTS), parsed);
     commitState(merged, "Imported configuration.");
-  } catch (e) {
+  } catch {
     alert("Invalid JSON.");
   }
 }
 
-// Copy HTML + JS source
 async function copyFullSource() {
   try {
     const [htmlResp, jsResp] = await Promise.all([
       fetch(window.location.href),
       fetch("core-app.js"),
     ]);
-    const htmlText = await htmlResp.text();
-    const jsText = await jsResp.text();
+    const html = await htmlResp.text();
+    const js = await jsResp.text();
     const combined =
       "----- HTML START -----\n" +
-      htmlText +
+      html +
       "\n----- HTML END -----\n\n" +
       "----- JS START -----\n" +
-      jsText +
+      js +
       "\n----- JS END -----\n";
     await navigator.clipboard.writeText(combined);
-    log("HTML + JS source copied to clipboard.");
+    log("HTML+JS source copied to clipboard.");
   } catch (e) {
-    console.warn("Copy source failed", e);
-    alert("Failed to copy source automatically. See console for details.");
+    console.warn(e);
+    alert("Failed to copy source automatically (likely CORS). Check console.");
   }
 }
 
-// Animation loop
-function animate() {
-  requestAnimationFrame(animate);
-  if (controls) controls.update();
-  if (renderer && scene && camera) {
-    renderer.render(scene, camera);
-  }
-  updateCollisions();
+/* ------------------------------------------------------------------ */
+/* UI wiring                                                          */
+/* ------------------------------------------------------------------ */
+
+function hookNumber(id, handler) {
+  const el = byId(id);
+  if (!el) return;
+  el.addEventListener("change", () => {
+    const v = parseFloat(el.value);
+    if (!Number.isFinite(v)) return;
+    handler(v);
+  });
 }
 
-// Event wiring
+function hookCheck(id, handler) {
+  const el = byId(id);
+  if (!el) return;
+  el.addEventListener("change", () => handler(el.checked));
+}
+
+function bindRangeNumber(rangeId, numberId, key, msg) {
+  const rng = byId(rangeId);
+  const num = byId(numberId);
+  if (!rng || !num) return;
+
+  const apply = (v) => {
+    if (!Number.isFinite(v)) return;
+    rng.value = v;
+    num.value = v;
+    const s = deepClone(state);
+    s[key] = v;
+    commitState(s, msg);
+  };
+
+  rng.addEventListener("input", () => {
+    const v = parseFloat(rng.value);
+    apply(v);
+  });
+  num.addEventListener("change", () => {
+    const v = parseFloat(num.value);
+    apply(v);
+  });
+}
+
 function setupUI() {
-  // Version labels
-  const htmlLabel = document.getElementById("html-version-label");
-  const jsLabel = document.getElementById("js-version-label");
-  if (htmlLabel) htmlLabel.textContent = HTML_VERSION;
-  if (jsLabel) jsLabel.textContent = JS_VERSION;
+  // version labels
+  const hv = byId("html-version-label");
+  const jv = byId("js-version-label");
+  if (hv) hv.textContent = HTML_VERSION;
+  if (jv) jv.textContent = JS_VERSION;
 
-  logListEl = document.getElementById("log-list");
-  logTextEl = document.getElementById("log-text");
+  logTextEl = byId("log-text");
+  logListEl = byId("log-list");
+  selectedNameEl = byId("selected-object-name");
+  baseFaceSelectEl = byId("select-base-face");
+  objectListEl = byId("object-list");
 
-  // Error modal buttons
-  const fixBtn = document.getElementById("btn-error-fix");
-  const ignoreBtn = document.getElementById("btn-error-ignore");
-  if (fixBtn) {
-    fixBtn.addEventListener("click", () => {
-      if (pendingInvalid && pendingInvalid.onFix) pendingInvalid.onFix();
-      closeErrorModal();
-    });
-  }
-  if (ignoreBtn) {
-    ignoreBtn.addEventListener("click", () => {
-      if (pendingInvalid && pendingInvalid.onIgnore) pendingInvalid.onIgnore();
-      closeErrorModal();
-    });
-  }
+  // Modal buttons
+  byId("btn-error-fix").addEventListener("click", () => {
+    if (pendingFixIgnore && pendingFixIgnore.onFix) pendingFixIgnore.onFix();
+    closeModal();
+  });
+  byId("btn-error-ignore").addEventListener("click", () => {
+    if (pendingFixIgnore && pendingFixIgnore.onIgnore) pendingFixIgnore.onIgnore();
+    closeModal();
+  });
 
   // Log toggle
-  const logToggle = document.getElementById("log-toggle");
-  const logPanel = document.getElementById("log-panel");
+  const logToggle = byId("log-toggle");
+  const logPanel = byId("log-panel");
   if (logToggle && logPanel) {
     logToggle.addEventListener("click", () => {
       logPanel.style.display = logPanel.style.display === "block" ? "none" : "block";
     });
   }
 
-  // Main geometry inputs
-  hookNumberInput("input-l-rect", (v) => {
-    const s = getCurrentState();
-    s.L_rect = v;
-    commitState(s, "Changed L_rect.");
-  });
-  hookNumberInput("input-x-hopper", (v) => {
-    const s = getCurrentState();
-    s.x_hopper = v;
-    commitState(s, "Changed x_hopper.");
-  });
-  hookNumberInput("input-h", (v) => {
-    const s = getCurrentState();
-    s.H = v;
-    commitState(s, "Changed H.");
-  });
-  hookNumberInput("input-w", (v) => {
-    const s = getCurrentState();
-    s.W = v;
-    commitState(s, "Changed W.");
-  });
-  hookNumberInput("input-t-wall", (v) => {
-    const s = getCurrentState();
-    s.t_wall = v;
-    commitState(s, "Changed t_wall.");
-  });
+  // geometry: sliders + numbers
+  bindRangeNumber("range-l-rect", "input-l-rect", "L_rect", "Changed L_rect.");
+  bindRangeNumber("range-x-hopper", "input-x-hopper", "x_hopper", "Changed x_hopper.");
+  bindRangeNumber("range-h", "input-h", "H", "Changed H.");
+  bindRangeNumber("range-w", "input-w", "W", "Changed W.");
+  bindRangeNumber("range-t-wall", "input-t-wall", "t_wall", "Changed t_wall.");
 
-  // Frame
-  hookCheckbox("chk-include-frame", (checked) => {
-    const s = getCurrentState();
-    s.include_frame = checked;
+  // frame
+  hookCheck("chk-include-frame", (c) => {
+    const s = deepClone(state);
+    s.include_frame = c;
     commitState(s, "Toggled frame.");
   });
-  hookNumberInput("input-h-frame", (v) => {
-    const s = getCurrentState();
+  hookNumber("input-h-frame", (v) => {
+    const s = deepClone(state);
     s.H_frame = v;
     commitState(s, "Changed H_frame.");
   });
-  hookCheckbox("chk-unlock-pockets", (checked) => {
-    const s = getCurrentState();
-    s.unlock_pockets = checked;
-    setPocketLocked(!checked);
+  hookCheck("chk-unlock-pockets", (c) => {
+    const s = deepClone(state);
+    s.unlock_pockets = c;
+    pocketLockUi(!c);
     commitState(s, "Toggled pocket lock.");
   });
-  hookNumberInput("input-w-pocket", (v) => {
-    const s = getCurrentState();
+  hookNumber("input-w-pocket", (v) => {
+    const s = deepClone(state);
     s.W_pocket = v;
     commitState(s, "Changed pocket width.");
   });
-  hookNumberInput("input-h-pocket", (v) => {
-    const s = getCurrentState();
+  hookNumber("input-h-pocket", (v) => {
+    const s = deepClone(state);
     s.H_pocket = v;
     commitState(s, "Changed pocket height.");
   });
-  hookNumberInput("input-s-pocket", (v) => {
-    const s = getCurrentState();
+  hookNumber("input-s-pocket", (v) => {
+    const s = deepClone(state);
     s.S_pocket = v;
     commitState(s, "Changed pocket spacing.");
   });
 
-  // Lid
-  hookCheckbox("chk-include-lid", (checked) => {
-    const s = getCurrentState();
-    s.include_lid = checked;
+  // lid
+  hookCheck("chk-include-lid", (c) => {
+    const s = deepClone(state);
+    s.include_lid = c;
     commitState(s, "Toggled lid.");
   });
-  hookNumberInput("input-t-lid", (v) => {
-    const s = getCurrentState();
+  hookNumber("input-t-lid", (v) => {
+    const s = deepClone(state);
     s.t_lid = v;
     commitState(s, "Changed lid thickness.");
   });
-  hookNumberInput("input-r-hole", (v) => {
-    const s = getCurrentState();
+  hookNumber("input-r-hole", (v) => {
+    const s = deepClone(state);
     s.r_hole = v;
     commitState(s, "Changed lid hole radius.");
   });
-  hookNumberInput("input-lid-edge", (v) => {
-    const s = getCurrentState();
+  hookNumber("input-lid-edge", (v) => {
+    const s = deepClone(state);
     s.lid_edge_length = v;
-    commitState(s, "Changed lid edge.");
+    commitState(s, "Changed lid ring width.");
   });
-  hookNumberInput("input-lid-offset", (v) => {
-    const s = getCurrentState();
+  hookNumber("input-lid-offset", (v) => {
+    const s = deepClone(state);
     s.lid_offset_from_hopper_edge = v;
-    commitState(s, "Changed lid offset.");
+    commitState(s, "Changed lid hole offset.");
   });
-  hookCheckbox("chk-advanced-lid-mat", (checked) => {
-    const s = getCurrentState();
-    s.advanced_lid_material = checked;
-    setLidMaterialInputsEnabled(checked);
+  hookCheck("chk-advanced-lid-mat", (c) => {
+    const s = deepClone(state);
+    s.advanced_lid_material = c;
+    lidMaterialUi(c);
     commitState(s, "Toggled advanced lid material.");
   });
-  hookNumberInput("input-rho-lid", (v) => {
-    const s = getCurrentState();
+  hookNumber("input-rho-lid", (v) => {
+    const s = deepClone(state);
     s.rho_lid = v;
     commitState(s, "Changed lid density.");
   });
 
-  // Materials & dust
-  const shellSel = document.getElementById("select-shell-material");
+  // materials / dust
+  const shellSel = byId("select-shell-material");
   if (shellSel) {
-    shellSel.addEventListener("change", () => updateShellDensityByMaterial(true));
+    shellSel.addEventListener("change", () => {
+      const s = deepClone(state);
+      s.shell_material = shellSel.value;
+      if (s.shell_material === "steel") s.rho_shell = 7850;
+      else if (s.shell_material === "stainless") s.rho_shell = 8000;
+      else if (s.shell_material === "aluminum") s.rho_shell = 2700;
+      state = s; // update density input before commit
+      if (s.shell_material !== "custom") {
+        byId("input-rho-shell").disabled = true;
+      } else {
+        byId("input-rho-shell").disabled = false;
+      }
+      commitState(s, "Changed shell material.");
+    });
   }
-  hookNumberInput("input-rho-shell", (v) => {
-    const s = getCurrentState();
+  hookNumber("input-rho-shell", (v) => {
+    const s = deepClone(state);
     s.rho_shell = v;
     s.shell_material = "custom";
-    const sel = document.getElementById("select-shell-material");
+    const sel = byId("select-shell-material");
     if (sel) sel.value = "custom";
+    byId("input-rho-shell").disabled = false;
     commitState(s, "Changed shell density.");
   });
-  hookNumberInput("input-rho-dust", (v) => {
-    const s = getCurrentState();
+  hookNumber("input-rho-dust", (v) => {
+    const s = deepClone(state);
     s.rho_dust = v;
     commitState(s, "Changed dust density.");
   });
-  hookNumberInput("input-humidity", (v) => {
-    const s = getCurrentState();
+  hookNumber("input-humidity", (v) => {
+    const s = deepClone(state);
     s.humidity = v;
     commitState(s, "Changed humidity (info only).");
   });
-  hookNumberInput("input-fill-perc", (v) => {
-    const s = getCurrentState();
+  hookNumber("input-fill-perc", (v) => {
+    const s = deepClone(state);
     s.fill_percentage = Math.max(0, Math.min(100, v));
     commitState(s, "Changed fill percentage.");
   });
 
-  // View & movement
-  hookCheckbox("chk-snap-grid", (checked) => {
-    const s = getCurrentState();
-    s.snap_to_grid = checked;
-    commitState(s, "Toggled snap to grid.");
+  // view & movement
+  hookCheck("chk-snap-grid", (c) => {
+    const s = deepClone(state);
+    s.snap_to_grid = c;
+    commitState(s, "Toggled snap-to-grid.");
   });
-  hookNumberInput("input-move-step", (v) => {
-    const s = getCurrentState();
+  hookNumber("input-move-step", (v) => {
+    const s = deepClone(state);
     s.move_step_mm = v;
     commitState(s, "Changed move step.");
   });
-  hookCheckbox("chk-ref-cube", (checked) => {
-    const s = getCurrentState();
-    s.show_reference_cube = checked;
+  hookCheck("chk-ref-cube", (c) => {
+    const s = deepClone(state);
+    s.show_reference_cube = c;
     commitState(s, "Toggled reference cube.");
   });
-  hookCheckbox("chk-show-cog-empty", (checked) => {
-    const s = getCurrentState();
-    s.show_cog_empty = checked;
+  hookCheck("chk-show-cog-empty", (c) => {
+    const s = deepClone(state);
+    s.show_cog_empty = c;
     commitState(s, "Toggled CoG empty.");
   });
-  hookCheckbox("chk-show-cog-filled", (checked) => {
-    const s = getCurrentState();
-    s.show_cog_filled = checked;
+  hookCheck("chk-show-cog-filled", (c) => {
+    const s = deepClone(state);
+    s.show_cog_filled = c;
     commitState(s, "Toggled CoG filled.");
   });
 
-  const resetViewBtn = document.getElementById("btn-reset-view");
+  const resetViewBtn = byId("btn-reset-view");
   if (resetViewBtn) {
     resetViewBtn.addEventListener("click", () => {
-      resetCameraToIsometric();
-      log("View reset to isometric.");
+      resetCamera();
+      log("Reset view to isometric.");
     });
   }
 
-  // Advanced
-  const exportCfgBtn = document.getElementById("btn-export-config");
-  if (exportCfgBtn) exportCfgBtn.addEventListener("click", exportConfig);
-  const importCfgBtn = document.getElementById("btn-import-config");
-  if (importCfgBtn) importCfgBtn.addEventListener("click", importConfig);
-
-  const exportContainerBtn = document.getElementById("btn-export-container");
-  if (exportContainerBtn) {
-    exportContainerBtn.addEventListener("click", () => {
-      exportContainer(state.export_lid_with_container);
+  // layers: base face selector
+  if (baseFaceSelectEl) {
+    baseFaceSelectEl.addEventListener("change", () => {
+      if (!selectedObject) return;
+      const obj = importedObjects.find((o) => o.mesh === selectedObject);
+      if (!obj) return;
+      setBaseFace(obj.mesh, baseFaceSelectEl.value);
     });
   }
-  const exportLidBtn = document.getElementById("btn-export-lid");
-  if (exportLidBtn) exportLidBtn.addEventListener("click", exportLid);
 
-  hookCheckbox("chk-export-lid-with-container", (checked) => {
-    const s = getCurrentState();
-    s.export_lid_with_container = checked;
-    commitState(s, "Toggled export lid with container.");
+  // advanced & IO
+  byId("btn-export-config").addEventListener("click", exportConfig);
+  byId("btn-import-config").addEventListener("click", importConfig);
+  byId("btn-export-container").addEventListener("click", () =>
+    exportContainer(state.export_lid_with_container)
+  );
+  byId("btn-export-lid").addEventListener("click", exportLid);
+  hookCheck("chk-export-lid-with-container", (c) => {
+    const s = deepClone(state);
+    s.export_lid_with_container = c;
+    commitState(s, "Toggled include lid in container STL.");
   });
 
-  const importStlInput = document.getElementById("input-import-stl");
+  const importStlInput = byId("input-import-stl");
   if (importStlInput) {
     importStlInput.addEventListener("change", (e) => {
       const file = e.target.files[0];
-      if (!file) return;
-      importSTL(file);
+      if (file) importSTL(file);
       importStlInput.value = "";
     });
   }
+  byId("btn-copy-source").addEventListener("click", copyFullSource);
 
-  const copySourceBtn = document.getElementById("btn-copy-source");
-  if (copySourceBtn) copySourceBtn.addEventListener("click", copyFullSource);
-
-  const resetDefaultsBtn = document.getElementById("btn-reset-defaults");
-  if (resetDefaultsBtn) {
-    resetDefaultsBtn.addEventListener("click", () => {
-      const confirmReset = window.confirm("Reset all parameters to defaults and clear saved config?");
-      if (!confirmReset) return;
-      state = structuredClone(DEFAULTS);
-      lastValidState = structuredClone(DEFAULTS);
-      undoStack.length = 0;
-      redoStack.length = 0;
-      applyStateToInputs();
-      rebuildSceneGeometry();
-      updateOutputs();
-      saveStateToLocalStorage();
-      updateUndoRedoButtons();
-      log("Reset to defaults.");
-    });
-  }
-
-  // Undo/Redo buttons
-  const undoBtn = document.getElementById("btn-undo");
-  const redoBtn = document.getElementById("btn-redo");
-  if (undoBtn) undoBtn.addEventListener("click", undo);
-  if (redoBtn) redoBtn.addEventListener("click", redo);
-
-  updateUndoRedoButtons();
-}
-
-// Input helpers
-function hookNumberInput(id, onChange) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.addEventListener("change", () => {
-    const v = parseFloat(el.value);
-    if (!Number.isFinite(v)) return;
-    onChange(v);
+  byId("btn-reset-defaults").addEventListener("click", () => {
+    if (!confirm("Reset all parameters to defaults and clear stored config?")) return;
+    state = deepClone(DEFAULTS);
+    lastValidState = deepClone(DEFAULTS);
+    undoStack.length = 0;
+    redoStack.length = 0;
+    applyStateToInputs();
+    rebuildGeometry();
+    updateOutputs();
+    saveState();
+    updateUndoButtons();
+    log("Reset to defaults.");
   });
-}
-function hookCheckbox(id, onChange) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.addEventListener("change", () => onChange(el.checked));
+
+  byId("btn-undo").addEventListener("click", undo);
+  byId("btn-redo").addEventListener("click", redo);
+  updateUndoButtons();
 }
 
-// Init
+/* ------------------------------------------------------------------ */
+/* Kickoff                                                            */
+/* ------------------------------------------------------------------ */
+
 window.addEventListener("DOMContentLoaded", () => {
-  loadStateFromLocalStorage();
+  loadState();
   applyStateToInputs();
   setupUI();
   initThree();
-  setupKeyboard();
   updateOutputs();
-  log("Application ready. Adjust parameters to begin.");
+  log("Application ready. Adjust parameters or import STLs to begin.");
 });
